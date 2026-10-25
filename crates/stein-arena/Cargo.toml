@@ -1,0 +1,19 @@
+[package]
+name = "stein-arena"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rustix = { version = "1.1.5", features = ["mm", "param"] }
+
+# Workspace clippy lints without `unsafe_code = "forbid"`.
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+too_many_lines = "deny"
+excessive_nesting = "warn"

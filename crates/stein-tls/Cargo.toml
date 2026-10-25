@@ -1,0 +1,36 @@
+[package]
+name = "stein-tls"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "TLS for the sans-io stack. Bytes in, bytes out, no sockets."
+
+# Deliberately NOT default-features. rustls defaults to aws-lc-rs, which builds
+# the whole aws-lc C library through cmake for FIPS validation nothing here
+# needs. ring is the same job at a fraction of the build.
+#
+# Writing TLS instead of taking a dependency was considered and rejected. It is
+# the one place where getting it subtly wrong produces no symptom: a chain
+# validated loosely or a comparison that is not constant time still connects,
+# still transfers, and is still broken. That is not a tradeoff worth making to
+# save a dependency.
+[dependencies]
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pki-types = "1"
+# The system trust store, so a corporate or user added CA works the way it does
+# for every other program on the machine.
+rustls-native-certs = "0.8"
+# Mozilla's roots, baked in, for a machine whose store is empty or unreadable.
+webpki-roots = "1"
+
+[dev-dependencies]
+# Certificates generated at test time, so a real handshake can run with no
+# network and no fixture to go stale. ring, matching the library.
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem"] }
+# A record layer written in the tests, to check that the secrets a handoff
+# gives are the ones another record layer needs. Already in the graph under
+# rustls.
+ring = "0.17"
+
+[lints]
+workspace = true

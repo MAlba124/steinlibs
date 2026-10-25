@@ -1,0 +1,30 @@
+[package]
+name = "stein-http"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+stein-core.workspace = true
+httparse.workspace = true
+# QUIC for `h3::Client`, the sans-IO state machine on ring through rustls. The
+# caller builds the `quinn_proto::ClientConfig`. `bytes` is quinn's datagram type.
+quinn-proto = { version = "0.11.18", default-features = false, features = ["rustls-ring"], optional = true }
+bytes = { version = "1", optional = true }
+
+[features]
+# HTTP/3 over QUIC. Framing, QPACK and the discovery parsers build without it.
+h3 = ["dep:quinn-proto", "dep:bytes"]
+
+[dev-dependencies]
+# Counting allocator for the no-alloc tests.
+stein-arena.workspace = true
+# TLS configs of the h3 tests' scripted QUIC peer, the version quinn-proto takes.
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+
+[[test]]
+name = "h3"
+required-features = ["h3"]
+
+[lints]
+workspace = true

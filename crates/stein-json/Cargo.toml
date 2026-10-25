@@ -1,0 +1,29 @@
+[package]
+name = "stein-json"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "JSON as a flat node table over the caller's bytes, scanned by lanes. no_std, no alloc without the alloc feature."
+
+[features]
+default = ["alloc"]
+# parse_vec and the typed readers into a Vec.
+alloc = []
+# The byte at a time parser the lane one is checked against, for the fuzz target.
+oracle = []
+
+[dependencies]
+# Strings and whitespace are scanned a lane block at a time. The level is
+# detected once per parse.
+fearless_simd.workspace = true
+
+[dev-dependencies]
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+stein-arena.workspace = true
+
+[[bench]]
+name = "json"
+harness = false
+
+[lints]
+workspace = true

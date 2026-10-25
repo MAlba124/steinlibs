@@ -1,0 +1,63 @@
+[package]
+name = "stein-io"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["driver"]
+# The driver over the queue. Buffers, op table, owned descriptors, file, dir and net helpers.
+driver = ["dep:stein-core", "rustix/pipe"]
+
+[dependencies]
+# Handle pool of the driver's op table.
+stein-core = { workspace = true, optional = true }
+# epoll, sockets, timerfd.
+rustix = { version = "1.1.5", features = ["event", "net", "time", "fs", "std"] }
+# Completion backend.
+io-uring = "0.7"
+# `msghdr` and `iovec` for sendmsg and recvmsg.
+libc = "0.2"
+
+[dev-dependencies]
+# Pipes in the queue tests.
+rustix = { version = "1.1.5", features = ["pipe"] }
+# Counting allocator for zero-allocation tests.
+stein-arena.workspace = true
+
+[[example]]
+name = "backends"
+required-features = ["driver"]
+
+[[example]]
+name = "turns"
+required-features = ["driver"]
+
+[[example]]
+name = "echo"
+required-features = ["driver"]
+# Runs the frame tests.
+test = true
+
+[[test]]
+name = "alloc"
+required-features = ["driver"]
+
+[[test]]
+name = "wake"
+required-features = ["driver"]
+
+[[bench]]
+name = "overhead"
+harness = false
+required-features = ["driver"]
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+too_many_lines = "deny"
+excessive_nesting = "warn"

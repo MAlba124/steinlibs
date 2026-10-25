@@ -1,0 +1,131 @@
+[package]
+name = "stein-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "MIT"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+stein-url.workspace = true
+stein-xml.workspace = true
+stein-http.workspace = true
+stein-dns.workspace = true
+stein-core.workspace = true
+stein-arena.workspace = true
+# with the byte at a time parser it is checked against
+stein-json = { workspace = true, features = ["oracle"] }
+stein-hash = { workspace = true, features = ["sha1x8"] }
+fearless_simd.workspace = true
+# Reference SHA-1 the stein one is checked against.
+rustcrypto-sha1 = { package = "sha1", version = "0.11" }
+
+[[bin]]
+name = "url"
+path = "fuzz_targets/url.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "xml"
+path = "fuzz_targets/xml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_server"
+path = "fuzz_targets/h2_server.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hpack"
+path = "fuzz_targets/hpack.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h1_request"
+path = "fuzz_targets/h1_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dechunk"
+path = "fuzz_targets/dechunk.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "json"
+path = "fuzz_targets/json.rs"
+test = false
+doc = false
+bench = false
+
+[lints]
+workspace = true
+[[bin]]
+name = "dns"
+path = "fuzz_targets/dns.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "svcb"
+path = "fuzz_targets/svcb.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h3_frame"
+path = "fuzz_targets/h3_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "qpack"
+path = "fuzz_targets/qpack.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "altsvc"
+path = "fuzz_targets/altsvc.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "stein_core"
+path = "fuzz_targets/stein_core.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "stein_hash"
+path = "fuzz_targets/stein_hash.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "stein_arena"
+path = "fuzz_targets/stein_arena.rs"
+test = false
+doc = false
+bench = false

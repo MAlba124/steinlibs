@@ -1,0 +1,27 @@
+[package]
+name = "stein-hash"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["sha1"]
+sha1 = []
+# Eight messages at once. The caller detects the SIMD level and passes it in.
+sha1x8 = ["sha1", "dep:fearless_simd"]
+
+[dependencies]
+fearless_simd = { workspace = true, optional = true }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+# Counting allocator for the no-alloc test.
+stein-arena.workspace = true
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "hash"
+harness = false
+required-features = ["sha1x8"]

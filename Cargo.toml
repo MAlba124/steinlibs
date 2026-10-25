@@ -1,0 +1,38 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/*",
+    "fuzz",
+    "xtask"
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+stein-core = { path = "crates/stein-core" }
+stein-arena = { path = "crates/stein-arena" }
+stein-hash = { path = "crates/stein-hash" }
+stein-url = { path = "crates/stein-url" }
+stein-xml = { path = "crates/stein-xml" }
+stein-http = { path = "crates/stein-http" }
+stein-dns = { path = "crates/stein-dns" }
+stein-json = { path = "crates/stein-json" }
+stein-tls = { path = "crates/stein-tls" }
+httparse = "1"
+fearless_simd = "1.0"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used       = "deny"
+expect_used       = "deny"
+panic             = "deny"
+todo              = "deny"
+unimplemented     = "deny"
+unreachable       = "deny"
+too_many_lines    = "deny"
+excessive_nesting = "warn"
