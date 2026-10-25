@@ -748,6 +748,80 @@ fn check_a_pipe_carries_bytes(back: Backend) {
     let _ = std::fs::remove_file(&p);
 }
 
+/// A length past the buffer size was cut to it silently, which a sized receive took for
+/// end of stream. It is refused now, the buffer freed, and a whole buffer still moves.
+fn check_a_length_past_the_buffer_is_refused(back: Backend) {
+    use std::io::Read as _;
+    driver!(io, back, ops = 8, bufs = 4, size = 64);
+    let (fd, mut peer) = pair(&mut io);
+    let (r, w) = io.pipe().expect("pipe");
+    let free = io.available();
+    let refused =
+        |r: Result<OpId, IoError>| matches!(r, Err(IoError::TooLong { len: 65, max: 64 }));
+    let to = SocketAddr::from(([127, 0, 0, 1], 9));
+    let control = Control {
+        level: IPPROTO_IP,
+        kind: IP_TOS,
+        data: &[0],
+    };
+    let b = io.alloc().expect("buffer");
+    assert!(refused(io.send(fd, b, 65)), "{back:?} send");
+    let b = io.alloc().expect("buffer");
+    assert!(refused(io.send_to(fd, b, 65, to)), "{back:?} send_to");
+    let b = io.alloc().expect("buffer");
+    assert!(
+        refused(io.send_msg(fd, b, 65, control)),
+        "{back:?} send_msg"
+    );
+    let b = io.alloc().expect("buffer");
+    assert!(refused(io.write(w, b, 65, APPEND)), "{back:?} write");
+    let b = io.alloc().expect("buffer");
+    let opt = io.set_sockopt(fd, libc::SOL_SOCKET, libc::SO_KEEPALIVE, b, 65);
+    assert!(refused(opt), "{back:?} set_sockopt");
+    let b = io.alloc().expect("buffer");
+    assert!(refused(io.recv_into(fd, b, 0, 65)), "{back:?} recv_into");
+    let b = io.alloc().expect("buffer");
+    assert!(refused(io.recv_into(fd, b, 60, 5)), "{back:?} recv_into at");
+    let b = io.alloc().expect("buffer");
+    assert!(
+        matches!(
+            io.recv_into(fd, b, u32::MAX, u32::MAX),
+            Err(IoError::TooLong { max: 64, .. })
+        ),
+        "{back:?} recv_into overflow"
+    );
+    let b = io.alloc().expect("buffer");
+    let read = io.read_at_into(r, 0, b, 1, 64);
+    assert!(refused(read), "{back:?} read_at_into");
+    assert_eq!(
+        io.available(),
+        free,
+        "{back:?} a refused call kept its buffer"
+    );
+    assert_eq!(io.in_flight(), 0, "{back:?} a refused call left an op");
+
+    let b = io.alloc().expect("buffer");
+    io.buf_mut(&b).fill(7);
+    let id = io.send(fd, b, 64).expect("send");
+    assert_eq!(result_of(&mut io, id), Ok(64), "{back:?}");
+    let mut got = [0u8; 64];
+    peer.read_exact(&mut got).expect("read");
+    assert_eq!(got, [7u8; 64], "{back:?}");
+
+    // A range ending at the buffer's end fills to it.
+    let b = io.alloc().expect("buffer");
+    let id = io.recv_into(fd, b, 60, 4).expect("recv_into");
+    peer.write_all(b"tail").expect("write");
+    let c = pump(&mut io).expect("recv_into completion");
+    assert_eq!((c.op, c.result), (id, Ok(4)), "{back:?}");
+    let b = c.buf.expect("the buffer comes back");
+    assert_eq!(&io.filled(&b)[60..], b"tail", "{back:?}");
+    io.release(b);
+    for fd in [fd, r, w] {
+        assert!(io.close(fd));
+    }
+}
+
 macro_rules! both {
     ($($name:ident => $check:ident,)*) => {$(
         #[test]
@@ -769,4 +843,5 @@ both! {
     a_file_goes_through_a_pipe_to_a_socket => check_a_file_goes_through_a_pipe_to_a_socket,
     a_splice_into_a_full_socket_is_cut_short => check_a_splice_into_a_full_socket_is_cut_short,
     a_pipe_carries_bytes => check_a_pipe_carries_bytes,
+    a_length_past_the_buffer_is_refused => check_a_length_past_the_buffer_is_refused,
 }

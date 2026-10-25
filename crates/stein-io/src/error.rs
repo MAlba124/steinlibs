@@ -43,7 +43,8 @@ pub enum IoError {
     /// A buffer on loan, so the arena cannot be laid out again, or a provided buffer id a
     /// group still holds.
     Loaned(u16),
-    /// A read or write longer than one call moves, see [`crate::queue::MAX_RW_COUNT`].
+    /// A read or write longer than one call moves, see [`crate::queue::MAX_RW_COUNT`], or
+    /// a range past the driver's buffer size, its end as `len`.
     TooLong { len: usize, max: usize },
 }
 

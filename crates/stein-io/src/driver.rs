@@ -254,7 +254,8 @@ impl Io {
         &self.bufs
     }
 
-    /// Take a buffer to fill and hand to [`Io::send`].
+    /// Take a buffer to fill and hand to [`Io::send`], [`Io::send_to`] or [`Io::write`],
+    /// or to receive into with [`Io::recv_into`].
     pub fn alloc(&mut self) -> Result<BufId, IoError> {
         self.bufs.take().map_err(|_| IoError::BuffersFull)
     }
@@ -521,6 +522,18 @@ impl Io {
             .insert(op.with_buf(i))
             .inspect_err(|_| self.free_buf(i))?;
         Ok((id, i))
+    }
+
+    /// `buf` back if one buffer holds `len` bytes at `at`. Else it is freed as for a
+    /// failed call and the error is [`IoError::TooLong`] with the end as its length.
+    fn fits(&mut self, buf: BufId, at: u32, len: u32) -> Result<BufId, IoError> {
+        let end = at as usize + len as usize;
+        let max = self.bufs.size() as usize;
+        if end <= max {
+            return Ok(buf);
+        }
+        self.drop_handed(buf);
+        Err(IoError::TooLong { len: end, max })
     }
 
     /// Free a caller's buffer handed to a call that failed before lending it. One of

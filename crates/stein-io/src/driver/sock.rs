@@ -217,10 +217,11 @@ impl Io {
 
     /// Driver owns and releases `buf` from here, caller must not, whatever this returns.
     /// An error frees it, but [`IoError::NotHeld`] when the caller does not hold it.
-    /// Short writes are continued.
+    /// Short writes are continued. A `len` past the buffer size is [`IoError::TooLong`].
     pub fn send(&mut self, fd: RawFd, buf: BufId, len: u32) -> Result<OpId, IoError> {
+        let buf = self.fits(buf, 0, len)?;
         let mut op = Op::new(Kind::Send, fd);
-        op.len = len.min(self.bufs.size());
+        op.len = len;
         let (id, bid) = self.insert_on(op, buf)?;
         let mem = self.buffer(bid, 0, op.len);
         self.submit(id, queue::Op::Send { fd: raw(fd), mem })?;
@@ -373,8 +374,9 @@ impl Io {
         len: u32,
         to: SocketAddr,
     ) -> Result<OpId, IoError> {
+        let buf = self.fits(buf, 0, len)?;
         let mut op = Op::new(Kind::SendTo, fd);
-        op.len = len.min(self.bufs.size());
+        op.len = len;
         let (id, bid) = self.insert_on(op, buf)?;
         let mem = self.buffer(bid, 0, op.len);
         self.submit(
@@ -432,7 +434,7 @@ impl Io {
         buf: BufId,
         len: u32,
     ) -> Result<OpId, IoError> {
-        let len = len.min(self.bufs.size());
+        let buf = self.fits(buf, 0, len)?;
         let (id, bid) = self.insert_on(Op::new(Kind::SetSockOpt, fd), buf)?;
         let value = self.buffer(bid, 0, len);
         let op = queue::Op::SetSockOpt {
@@ -447,10 +449,9 @@ impl Io {
 
     /// Receive exactly `len` bytes into a caller buffer at `at`. Short result means EOF.
     /// Filled length counts the prefix. Failure or cancel releases the buffer, an error
-    /// here too, see [`Io::send`].
+    /// here too, see [`Io::send`]. A range past the buffer size is [`IoError::TooLong`].
     pub fn recv_into(&mut self, fd: RawFd, buf: BufId, at: u32, len: u32) -> Result<OpId, IoError> {
-        let at = at.min(self.bufs.size());
-        let len = len.min(self.bufs.size() - at);
+        let buf = self.fits(buf, at, len)?;
         let mut op = Op::new(Kind::RecvInto, fd);
         op.sent = at;
         op.len = len;
@@ -516,7 +517,7 @@ impl Io {
             self.drop_handed(buf);
             return Err(too_long);
         };
-        let len = len.min(self.bufs.size());
+        let buf = self.fits(buf, 0, len)?;
         let mut op = Op::new(Kind::SendMsg, fd);
         op.len = len;
         let (id, bid) = self.insert_on(op, buf)?;

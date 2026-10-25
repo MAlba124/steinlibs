@@ -84,7 +84,7 @@ impl Io {
 
     /// Read into a caller buffer at `at`. Driver owns it until completion.
     /// Filled length counts the prefix. Failure or cancel releases the buffer, an error
-    /// here too, see [`Io::send`].
+    /// here too, see [`Io::send`]. A range past the buffer size is [`IoError::TooLong`].
     pub fn read_at_into(
         &mut self,
         fd: RawFd,
@@ -93,8 +93,7 @@ impl Io {
         at: u32,
         len: u32,
     ) -> Result<OpId, IoError> {
-        let at = at.min(self.bufs.size());
-        let len = len.min(self.bufs.size() - at);
+        let buf = self.fits(buf, at, len)?;
         let mut op = Op::new(Kind::Read, fd);
         op.offset = offset;
         // Reuse `sent`/`len` for the landing range.
@@ -132,8 +131,9 @@ impl Io {
     /// Write at `offset`, or the fd position for [`APPEND`]. Driver owns `buf` as for
     /// [`Io::send`]. Short writes are continued, so completion means all of `len` went out.
     pub fn write(&mut self, fd: RawFd, buf: BufId, len: u32, offset: u64) -> Result<OpId, IoError> {
+        let buf = self.fits(buf, 0, len)?;
         let mut op = Op::new(Kind::Write, fd);
-        op.len = len.min(self.bufs.size());
+        op.len = len;
         op.offset = offset;
         let (id, bid) = self.insert_on(op, buf)?;
         let mem = self.buffer(bid, 0, op.len);
