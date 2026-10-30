@@ -1,0 +1,13 @@
+[package]
+name = "stein-dbus"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+stein-io.workspace = true
+rustix = { version = "1.1.5", features = ["process"] }
+
+[lints]
+workspace = true

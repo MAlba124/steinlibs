@@ -979,6 +979,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "stein-dbus"
+version = "0.1.0"
+dependencies = [
+ "rustix",
+ "stein-io",
+]
+
+[[package]]
 name = "stein-dns"
 version = "0.1.0"
 
@@ -991,6 +999,7 @@ dependencies = [
  "sha1",
  "stein-arena",
  "stein-core",
+ "stein-dbus",
  "stein-dns",
  "stein-hash",
  "stein-http",

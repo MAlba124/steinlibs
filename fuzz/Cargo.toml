@@ -16,6 +16,7 @@ stein-http.workspace = true
 stein-dns.workspace = true
 stein-core.workspace = true
 stein-arena.workspace = true
+stein-dbus.workspace = true
 # with the byte at a time parser it is checked against
 stein-json = { workspace = true, features = ["oracle"] }
 stein-hash = { workspace = true, features = ["sha1x8"] }
@@ -129,3 +130,25 @@ path = "fuzz_targets/stein_arena.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "dbus_msg"
+path = "fuzz_targets/dbus_msg.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dbus_conn"
+path = "fuzz_targets/dbus_conn.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dbus_sig"
+path = "fuzz_targets/dbus_sig.rs"
+test = false
+doc = false
+bench = false
+

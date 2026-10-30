@@ -21,6 +21,8 @@ stein-http = { path = "crates/stein-http" }
 stein-dns = { path = "crates/stein-dns" }
 stein-json = { path = "crates/stein-json" }
 stein-tls = { path = "crates/stein-tls" }
+stein-io = { path = "crates/stein-io" }
+stein-dbus = { path = "crates/stein-dbus" }
 httparse = "1"
 fearless_simd = "1.0"
 
