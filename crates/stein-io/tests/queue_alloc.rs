@@ -55,6 +55,7 @@ fn rig(want: Want) -> Rig {
         want,
         single_issuer: true,
         fixed_buffers: 0,
+        punt_reads: false,
     };
     let mut q = Queue::new(Owned::new(16, 1024), setup).expect("queue");
     let path =

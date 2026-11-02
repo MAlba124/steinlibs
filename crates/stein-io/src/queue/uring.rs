@@ -39,6 +39,8 @@ pub(super) struct Ring {
     /// Registered buffer slots. `fixed_used` is the taken bitmap.
     fixed: u16,
     fixed_used: u64,
+    /// See [`Setup::punt_reads`].
+    punt_reads: bool,
 }
 
 impl Ring {
@@ -54,6 +56,7 @@ impl Ring {
             flags,
             fixed: 0,
             fixed_used: 0,
+            punt_reads: setup.punt_reads,
         };
         let want = setup.fixed_buffers.min(64);
         if want > 0
@@ -80,9 +83,13 @@ impl Ring {
         key: Key,
         link: bool,
     ) -> Result<(), IoError> {
+        let punt = self.punt_reads && matches!(op, Op::Read { at, .. } if at != super::POSITION);
         let mut e = encode(op, side)?.user_data(key.0);
         if link {
             e = e.flags(squeue::Flags::IO_LINK);
+        }
+        if punt {
+            e = e.flags(squeue::Flags::ASYNC);
         }
         self.queue(&e)
     }

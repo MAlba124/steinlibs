@@ -167,7 +167,7 @@ impl Io {
             Setup {
                 want: Want::Any,
                 single_issuer: true,
-                fixed_buffers: 0,
+                ..Setup::default()
             },
         )?;
         io.ring_close = io.q.backend() == Backend::Uring;

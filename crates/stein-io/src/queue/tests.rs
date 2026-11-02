@@ -14,6 +14,7 @@ fn queue(want: Want) -> Queue {
         want,
         single_issuer: false,
         fixed_buffers: 4,
+        punt_reads: false,
     };
     let q = Queue::new(Owned::new(32, 1024), setup).expect("a queue");
     assert_eq!(
@@ -133,6 +134,7 @@ both!(
     a_file_range_is_synced_and_advised,
     a_symlink_is_stated_itself_unless_followed,
     a_burst_on_a_repeating_receive_comes_in_one_reap,
+    punted_reads_land_where_they_were_asked,
 );
 
 fn a_file_is_written_read_stat_renamed_and_unlinked(want: Want) {
@@ -513,6 +515,54 @@ fn a_region_is_read_into_by_range(want: Want) {
     assert_eq!(one(&mut q, read, 1).result(), Ok(4));
     drop(q);
     assert_eq!(&slab[100..104], b"3456");
+    let _ = std::fs::remove_file(&p);
+}
+
+/// Reads in flight together through the kernel's workers each land at their own offset, and a
+/// read at the position, never punted, goes on from where the file is.
+fn punted_reads_land_where_they_were_asked(want: Want) {
+    let p = tmp("punted", want);
+    let bytes: Vec<u8> = (0..64 * 1024u32).map(|i| (i % 251) as u8).collect();
+    std::fs::write(&p, &bytes).expect("fixture");
+    let file = std::fs::File::open(&p).expect("open");
+    let setup = Setup {
+        want,
+        punt_reads: true,
+        ..Setup::default()
+    };
+    let mut q = Queue::new(Owned::new(32, 1024), setup).expect("a queue");
+    let mut bufs = [[0u8; 4096]; 4];
+    let ats = [60_000u64, 0, 33_333, 8_192];
+    for (i, (b, at)) in bufs.iter_mut().zip(ats).enumerate() {
+        let read = Op::Read {
+            fd: Fd::Raw(file.as_raw_fd()),
+            mem: mem(b),
+            at,
+        };
+        q.push(read, i as u64).expect("push");
+    }
+    let mut seen = Vec::new();
+    for (i, at) in ats.iter().enumerate() {
+        let want_len = (bytes.len() - *at as usize).min(4096);
+        assert_eq!(
+            wait(&mut q, i as u64, &mut seen).result(),
+            Ok(want_len as u32)
+        );
+    }
+    for (b, at) in bufs.iter().zip(ats) {
+        let at = at as usize;
+        let n = (bytes.len() - at).min(4096);
+        assert_eq!(&b[..n], &bytes[at..at + n], "read at {at}");
+    }
+    let mut head = [0u8; 16];
+    let read = Op::Read {
+        fd: Fd::Raw(file.as_raw_fd()),
+        mem: mem(&mut head),
+        at: POSITION,
+    };
+    assert_eq!(one(&mut q, read, 9).result(), Ok(16));
+    assert_eq!(&head, &bytes[..16]);
+    drop(q);
     let _ = std::fs::remove_file(&p);
 }
 
@@ -913,6 +963,7 @@ fn a_ring_from_the_store_takes_receives(want: Want) {
         want,
         single_issuer: false,
         fixed_buffers: 0,
+        punt_reads: false,
     };
     let mut q = Queue::new(Owned::with_rings(8, 1024, ring_pages(4)), setup).expect("queue");
     let g = q.add_ring(4).expect("a ring in the store's pages");

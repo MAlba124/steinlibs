@@ -410,6 +410,10 @@ pub struct Setup {
     pub single_issuer: bool,
     /// Registered buffer slots for fixed regions.
     pub fixed_buffers: u16,
+    /// Positioned reads run in the kernel's workers (`IOSQE_ASYNC`). A buffered read that
+    /// misses the page cache otherwise waits out the disk inside the submitter's
+    /// `io_uring_enter`, past its timeout and any wake. No effect on `epoll`.
+    pub punt_reads: bool,
 }
 
 impl Default for Setup {
@@ -418,6 +422,7 @@ impl Default for Setup {
             want: Want::Any,
             single_issuer: false,
             fixed_buffers: 0,
+            punt_reads: false,
         }
     }
 }

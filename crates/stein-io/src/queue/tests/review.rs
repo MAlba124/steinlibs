@@ -216,6 +216,7 @@ fn a_failed_cancel_leaves_the_key_cancellable() {
         want: Want::Uring,
         single_issuer: true,
         fixed_buffers: 0,
+        punt_reads: false,
     };
     let mut q = Queue::new(Owned::new(8, 0), setup).expect("queue");
     if q.ring_flags() != RingFlags::Deferred {

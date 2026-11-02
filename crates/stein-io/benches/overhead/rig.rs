@@ -41,6 +41,7 @@ pub fn queue(want: Want, coop: bool) -> Result<Queue, BenchError> {
         want,
         single_issuer: !coop,
         fixed_buffers: 0,
+        punt_reads: false,
     };
     Queue::new(Owned::new(SLOTS, FDS), setup).map_err(|r| BenchError::Stein(r.error))
 }
