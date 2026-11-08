@@ -43,5 +43,5 @@ pub use net::UnixAddr;
 #[cfg(feature = "driver")]
 pub use op::{Completion, Kind, Op, OpId};
 pub use queue::{Backend, CWD, RingFlags};
-/// Flags and mode for [`queue::Op::Open`].
-pub use rustix::fs::{Mode, OFlags};
+/// Flags and mode for [`queue::Op::Open`], resolve flags for [`queue::Op::Open2`].
+pub use rustix::fs::{Mode, OFlags, ResolveFlags};

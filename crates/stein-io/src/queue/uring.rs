@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use io_uring::types::{BufRingEntry, Fixed, SubmitArgs, Timespec};
 use io_uring::{IoUring, opcode, squeue, types};
+use rustix::fs::{Mode, OFlags, ResolveFlags};
 use rustix::io::Errno;
 use rustix::net::SocketAddrAny;
 
@@ -460,48 +461,7 @@ pub(super) fn encode(op: Op, side: &mut Side) -> Result<squeue::Entry, IoError> 
 }
 
 fn encode_file(op: Op, side: &mut Side) -> Result<squeue::Entry, IoError> {
-    let cstr = |m: Mem| -> *const libc::c_char {
-        if m.len == 0 {
-            c"".as_ptr()
-        } else {
-            m.ptr.cast()
-        }
-    };
     Ok(match op {
-        Op::Open {
-            dir,
-            path,
-            flags,
-            mode,
-        } => opcode::OpenAt::new(types::Fd(dir), cstr(path))
-            .flags(flags.bits() as i32)
-            .mode(mode.bits())
-            .build(),
-        Op::Statx {
-            dir,
-            path,
-            out,
-            follow,
-        } => {
-            let flags = statx_flags(path.len == 0, follow);
-            opcode::Statx::new(types::Fd(dir), cstr(path), out.ptr.cast())
-                .flags(flags)
-                .mask(libc::STATX_BASIC_STATS)
-                .build()
-        }
-        Op::Rename {
-            from_dir,
-            from,
-            to_dir,
-            to,
-        } => opcode::RenameAt::new(types::Fd(from_dir), cstr(from), types::Fd(to_dir), cstr(to))
-            .build(),
-        Op::Unlink { dir, path, rmdir } => {
-            let flags = if rmdir { libc::AT_REMOVEDIR } else { 0 };
-            opcode::UnlinkAt::new(types::Fd(dir), cstr(path))
-                .flags(flags)
-                .build()
-        }
         Op::Close { fd } => opcode::Close::new(types::Fd(fd.raw())).build(),
         Op::Fallocate { fd, at, len } => {
             on!(fd, f => opcode::Fallocate::new(f, len).offset(at).build())
@@ -559,8 +519,75 @@ fn encode_file(op: Op, side: &mut Side) -> Result<squeue::Entry, IoError> {
         Op::Post { ring, value } => {
             opcode::MsgRingData::new(types::Fd(ring), POSTED, value, None).build()
         }
+        _ => return encode_path(op, side),
+    })
+}
+
+/// Ops naming paths, read by the kernel as C strings.
+fn encode_path(op: Op, side: &mut Side) -> Result<squeue::Entry, IoError> {
+    let cstr = |m: Mem| -> *const libc::c_char {
+        if m.len == 0 {
+            c"".as_ptr()
+        } else {
+            m.ptr.cast()
+        }
+    };
+    Ok(match op {
+        Op::Open {
+            dir,
+            path,
+            flags,
+            mode,
+        } => opcode::OpenAt::new(types::Fd(dir), cstr(path))
+            .flags(flags.bits() as i32)
+            .mode(mode.bits())
+            .build(),
+        Op::Open2 {
+            dir,
+            path,
+            flags,
+            mode,
+            resolve,
+        } => {
+            // The kernel copies it at submission, the side outlives that.
+            side.how = open_how(flags, mode, resolve);
+            let how: *const types::OpenHow = &side.how;
+            opcode::OpenAt2::new(types::Fd(dir), cstr(path), how).build()
+        }
+        Op::Statx {
+            dir,
+            path,
+            out,
+            follow,
+        } => {
+            let flags = statx_flags(path.len == 0, follow);
+            opcode::Statx::new(types::Fd(dir), cstr(path), out.ptr.cast())
+                .flags(flags)
+                .mask(super::STATX_MASK)
+                .build()
+        }
+        Op::Rename {
+            from_dir,
+            from,
+            to_dir,
+            to,
+        } => opcode::RenameAt::new(types::Fd(from_dir), cstr(from), types::Fd(to_dir), cstr(to))
+            .build(),
+        Op::Unlink { dir, path, rmdir } => {
+            let flags = if rmdir { libc::AT_REMOVEDIR } else { 0 };
+            opcode::UnlinkAt::new(types::Fd(dir), cstr(path))
+                .flags(flags)
+                .build()
+        }
         _ => return Err(IoError::Unsupported),
     })
+}
+
+pub(super) fn open_how(flags: OFlags, mode: Mode, resolve: ResolveFlags) -> types::OpenHow {
+    types::OpenHow::new()
+        .flags(flags.bits() as u64)
+        .mode(mode.bits() as u64)
+        .resolve(resolve.bits())
 }
 
 pub(super) fn statx_flags(empty: bool, follow: bool) -> i32 {

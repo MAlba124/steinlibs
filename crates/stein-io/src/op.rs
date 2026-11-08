@@ -22,6 +22,8 @@ pub enum Kind {
     Timeout,
     /// Completes with a new descriptor the driver owns.
     Open,
+    /// [`Kind::Open`] with resolve flags.
+    Open2,
     /// At an offset, into a buffer the driver supplies.
     Read,
     /// Completes with a buffer [`crate::file::meta`] reads.
@@ -184,6 +186,7 @@ impl fmt::Display for Kind {
             Kind::Close => "close",
             Kind::Timeout => "timeout",
             Kind::Open => "open",
+            Kind::Open2 => "open2",
             Kind::Read => "read",
             Kind::Stat => "stat",
             Kind::Write => "write",

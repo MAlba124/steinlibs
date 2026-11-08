@@ -6,12 +6,18 @@ use super::*;
 impl Io {
     /// Stat the fd an in-flight open returns, as a plain call once it lands. No punt.
     /// Completes in the same tick as the open. Open failure propagates, cancel gives `ECANCELED`.
-    /// One stat per open.
+    /// One stat per open. Buffers shorter than [`crate::file::META_LEN`] are [`IoError::TooLong`].
     pub fn stat_opened(&mut self, open: OpId) -> Result<OpId, IoError> {
         let waited = self.ops.get(open).copied();
-        let Some(o) = waited.filter(|o| o.kind == Kind::Open && o.aux == 0) else {
+        let opening = |o: &Op| matches!(o.kind, Kind::Open | Kind::Open2) && o.aux == 0;
+        let Some(o) = waited.filter(opening) else {
             return Err(IoError::NotOpening);
         };
+        let max = self.bufs.size() as usize;
+        let len = crate::file::META_LEN as usize;
+        if max < len {
+            return Err(IoError::TooLong { len, max });
+        }
         let bid = self.bufs.take_lent().map_err(|_| IoError::BuffersFull)?;
         let mut op = Op::new(Kind::Stat, -1).with_buf(bid);
         op.aux = STAT_WAITS;
@@ -57,7 +63,7 @@ impl Io {
     /// Cancel an open or its waiting stat. True if nothing is left in the kernel.
     /// The stat has no entry, so its buffer frees at once.
     pub(super) fn cancel_waiting(&mut self, op: Op) -> bool {
-        if op.kind == Kind::Open {
+        if matches!(op.kind, Kind::Open | Kind::Open2) {
             self.stat_landed(op, Err(Errno::CANCELED));
         }
         if op.kind != Kind::Stat {

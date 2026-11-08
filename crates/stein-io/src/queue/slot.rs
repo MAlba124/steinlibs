@@ -5,7 +5,7 @@
 
 use std::time::Instant;
 
-use io_uring::types::Timespec;
+use io_uring::types::{OpenHow, Timespec};
 use rustix::net::addr::SocketAddrStorage;
 
 use super::{NONE, Op, RingPage};
@@ -36,6 +36,7 @@ pub(super) enum Behind {
 #[repr(C)]
 pub(super) struct Side {
     pub(super) ts: Timespec,
+    pub(super) how: OpenHow,
     pub(super) hdr: libc::msghdr,
     pub(super) iov: libc::iovec,
     pub(super) name: SocketAddrStorage,
@@ -47,6 +48,7 @@ impl Side {
     fn new() -> Side {
         Side {
             ts: Timespec::new(),
+            how: OpenHow::new(),
             // SAFETY: integers and pointers, all zeros is valid.
             hdr: unsafe { core::mem::zeroed() },
             iov: libc::iovec {

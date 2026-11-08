@@ -13,7 +13,7 @@ use std::os::fd::{BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use rustix::fs::{Mode, OFlags};
+use rustix::fs::{Mode, OFlags, ResolveFlags};
 use rustix::io::Errno;
 
 use crate::error::IoError;
@@ -292,8 +292,16 @@ pub enum Op {
         flags: OFlags,
         mode: Mode,
     },
+    /// `openat2(2)`, `path` NUL terminated. `mode` stays empty unless `flags` create.
+    Open2 {
+        dir: RawFd,
+        path: Mem,
+        flags: OFlags,
+        mode: Mode,
+        resolve: ResolveFlags,
+    },
     /// Writes a `struct statx` to `out`, see [`statx_of`]. Empty path means `dir` itself.
-    /// A symlink at the end of `path` is stated itself unless `follow`.
+    /// A symlink at the end of `path` is stated itself unless `follow`. Asks [`STATX_MASK`].
     Statx {
         dir: RawFd,
         path: Mem,
@@ -1343,7 +1351,7 @@ fn mems(op: &Op) -> [Mem; 2] {
         | Op::RecvFrom { mem, .. }
         | Op::RecvAll { mem, .. } => [mem, e],
         Op::SendMsg { mem, control, .. } => [mem, control],
-        Op::Open { path, .. } | Op::Unlink { path, .. } => [path, e],
+        Op::Open { path, .. } | Op::Open2 { path, .. } | Op::Unlink { path, .. } => [path, e],
         Op::Statx { path, out, .. } => [path, out],
         Op::Rename { from, to, .. } => [from, to],
         Op::SetSockOpt { value, .. } => [value, e],
@@ -1368,7 +1376,10 @@ fn written(op: &Op) -> Mem {
 fn paths(op: &Op) -> [Mem; 2] {
     let e = Mem::EMPTY;
     match *op {
-        Op::Open { path, .. } | Op::Unlink { path, .. } | Op::Statx { path, .. } => [path, e],
+        Op::Open { path, .. }
+        | Op::Open2 { path, .. }
+        | Op::Unlink { path, .. }
+        | Op::Statx { path, .. } => [path, e],
         Op::Rename { from, to, .. } => [from, to],
         _ => [e, e],
     }
@@ -1413,7 +1424,9 @@ fn check_shape(op: &Op) -> Result<(), IoError> {
         Ok(())
     };
     match op {
-        Op::Open { path: p, .. } | Op::Unlink { path: p, .. } => path(p),
+        Op::Open { path: p, .. } | Op::Open2 { path: p, .. } | Op::Unlink { path: p, .. } => {
+            path(p)
+        }
         Op::Statx { path: p, out, .. } if out.len() >= STATX_LEN => path(p),
         Op::Statx { out, .. } => Err(IoError::OutOfRegion {
             at: 0,
@@ -1513,7 +1526,7 @@ fn close_after(op: &Op) {
 
 /// Close a descriptor an accept or open returned that nobody will see.
 fn orphan(op: &Op, res: i32) {
-    if res >= 0 && matches!(op, Op::Accept { .. } | Op::Open { .. }) {
+    if res >= 0 && matches!(op, Op::Accept { .. } | Op::Open { .. } | Op::Open2 { .. }) {
         // SAFETY: fresh from the kernel and its completion is discarded, so nothing
         // else knows the number.
         drop(unsafe { OwnedFd::from_raw_fd(res) });
@@ -1538,6 +1551,9 @@ pub const fn ring_pages(entries: usize) -> usize {
 
 /// Room a [`Op::Statx`] needs, including the kernel's reserve.
 pub const STATX_LEN: usize = 256;
+/// Fields every [`Op::Statx`] asks. Kernels since 5.8 fill the mount id unasked, older ones
+/// leave it out of `stx_mask`.
+pub const STATX_MASK: u32 = libc::STATX_BASIC_STATS | libc::STATX_MNT_ID;
 
 /// The `struct statx` a [`Op::Statx`] wrote, if `bytes` holds one.
 pub fn statx_of(bytes: &[u8]) -> Option<rustix::fs::Statx> {

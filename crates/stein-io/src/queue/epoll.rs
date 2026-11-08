@@ -109,6 +109,7 @@ impl Queue {
             }
             Op::Nop
             | Op::Open { .. }
+            | Op::Open2 { .. }
             | Op::Statx { .. }
             | Op::Rename { .. }
             | Op::Unlink { .. } => {
@@ -822,6 +823,13 @@ fn file(op: Op) -> i32 {
             flags,
             mode,
         } => sys::open(dir, path, flags.bits() as i32, mode.bits()),
+        Op::Open2 {
+            dir,
+            path,
+            flags,
+            mode,
+            resolve,
+        } => sys::open2(dir, path, &super::uring::open_how(flags, mode, resolve)),
         Op::Statx {
             dir,
             path,
@@ -1216,10 +1224,16 @@ mod sys {
         retry(|| unsafe { libc::openat(dir, path(p), flags, mode) } as isize)
     }
 
+    pub(super) fn open2(dir: RawFd, p: Mem, how: &io_uring::types::OpenHow) -> i32 {
+        let (how, size) = (how as *const io_uring::types::OpenHow, size_of_val(how));
+        retry(|| unsafe { libc::syscall(libc::SYS_openat2, dir, path(p), how, size) } as isize)
+    }
+
     pub(super) fn statx(dir: RawFd, p: Mem, out: Mem, follow: bool) -> i32 {
         let flags = super::super::uring::statx_flags(p.is_empty(), follow);
         let buf = out.ptr().cast::<libc::statx>();
-        retry(|| unsafe { libc::statx(dir, path(p), flags, libc::STATX_BASIC_STATS, buf) } as isize)
+        let mask = super::super::STATX_MASK;
+        retry(|| unsafe { libc::statx(dir, path(p), flags, mask, buf) } as isize)
     }
 
     pub(super) fn rename(from_dir: RawFd, from: Mem, to_dir: RawFd, to: Mem) -> i32 {

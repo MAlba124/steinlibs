@@ -710,7 +710,7 @@ impl Io {
             Kind::Timeout => self.done_timeout(id, res),
             Kind::Connect => self.done_connect(id, op, res),
             Kind::Recv => self.done_recv(id, op, c),
-            Kind::Open => self.done_open(id, op, res),
+            Kind::Open | Kind::Open2 => self.done_open(id, op, res),
             Kind::Read | Kind::Stat => self.done_file(id, op, res),
             Kind::Accept => self.done_accept(id, op, c),
             Kind::RecvFrom => self.done_recvfrom(id, op, c),
@@ -997,7 +997,7 @@ impl Drop for Io {
 
 /// Kinds whose result is a new descriptor.
 fn gives_fd(kind: Kind) -> bool {
-    matches!(kind, Kind::Open | Kind::Accept)
+    matches!(kind, Kind::Open | Kind::Open2 | Kind::Accept)
 }
 
 fn result_of(res: i32) -> Result<u32, Errno> {

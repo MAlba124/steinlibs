@@ -1436,12 +1436,14 @@ fn a_unix_socket_nobody_listens_on_is_refused() {
 
 mod disk;
 mod mail;
+mod open2;
 mod review;
 mod review2;
 mod review3;
 mod review4;
 mod review5;
 mod sock;
+mod stat_id;
 mod turn;
 
 fn check_a_shared_send_goes_past_a_buffer_from_where_it_lies(back: Backend) {

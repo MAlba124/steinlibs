@@ -1211,8 +1211,10 @@ fn a_burst_on_a_repeating_receive_comes_in_one_reap(want: Want) {
     drop(page);
 }
 
+mod open2;
 mod review;
 mod review2;
 mod review3;
 mod review4;
 mod review5;
+mod stat_id;

@@ -1,6 +1,6 @@
 //! File ops. One ring entry each. On epoll they are blocking syscalls made at submission.
 
-use rustix::fs::{AtFlags, Mode, OFlags, StatxFlags};
+use rustix::fs::{AtFlags, Mode, OFlags, ResolveFlags, StatxFlags};
 
 use super::*;
 use crate::{dir, file};
@@ -16,6 +16,7 @@ const O_CLOEXEC: OFlags = OFlags::CLOEXEC;
 const APPEND_MODE: u32 = 0o644;
 /// `struct statx` room at the head of a stat buffer, path follows.
 const STATX_ROOM: u32 = queue::STATX_LEN as u32;
+const _: () = assert!(file::META_LEN <= STATX_ROOM);
 
 impl Io {
     /// Open read-only. Completes with an fd the driver owns.
@@ -59,6 +60,34 @@ impl Io {
                 path,
                 flags,
                 mode,
+            },
+        )?;
+        Ok(id)
+    }
+
+    /// [`Io::open_with`] through `openat2(2)`, so `resolve` bounds the walk, such as
+    /// [`ResolveFlags::BENEATH`] refusing an escape from `dir` with `EXDEV`. `mode` stays
+    /// empty unless `flags` create. Completes as [`Kind::Open2`] with an fd the driver owns.
+    pub fn open_beneath(
+        &mut self,
+        dir: RawFd,
+        path: &[u8],
+        flags: OFlags,
+        mode: Mode,
+        resolve: ResolveFlags,
+    ) -> Result<OpId, IoError> {
+        let bid = self.path_buf(path, 0)?;
+        let (id, bid) = self.insert_path(Kind::Open2, bid)?;
+        let path = self.buffer(bid, 0, path.len() as u32 + 1);
+        let flags = flags | O_CLOEXEC;
+        self.submit(
+            id,
+            queue::Op::Open2 {
+                dir,
+                path,
+                flags,
+                mode,
+                resolve,
             },
         )?;
         Ok(id)
@@ -185,8 +214,9 @@ impl Io {
 
     /// Synchronous fd stat, for a stat that waited on its open.
     pub(super) fn stat_fd_now(&mut self, id: OpId, fd: RawFd, bid: u16) {
+        let mask = StatxFlags::from_bits_retain(queue::STATX_MASK);
         let got = match borrow(&self.owned, fd) {
-            Some(f) => rustix::fs::statx(f, "", AtFlags::EMPTY_PATH, StatxFlags::BASIC_STATS),
+            Some(f) => rustix::fs::statx(f, "", AtFlags::EMPTY_PATH, mask),
             None => Err(Errno::BADF),
         };
         match got {
