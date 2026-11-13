@@ -418,9 +418,11 @@ pub struct Setup {
     pub single_issuer: bool,
     /// Registered buffer slots for fixed regions.
     pub fixed_buffers: u16,
-    /// Positioned reads run in the kernel's workers (`IOSQE_ASYNC`). A buffered read that
-    /// misses the page cache otherwise waits out the disk inside the submitter's
-    /// `io_uring_enter`, past its timeout and any wake. No effect on `epoll`.
+    /// Every positioned read runs in the kernel's workers (`IOSQE_ASYNC`). A buffered read
+    /// that misses the page cache otherwise waits out the disk inside the submitter's
+    /// `io_uring_enter`, past its timeout and any wake. Costs a wake and a context switch
+    /// per read, so one that hits the page cache runs 4-5 times slower, see
+    /// [`Queue::push_punted`] to pick per read instead. No effect on `epoll`.
     pub punt_reads: bool,
 }
 
@@ -651,14 +653,24 @@ impl Queue {
     /// Queue an operation tagged `user`. On the ring nothing is submitted until
     /// [`Queue::submit`] or [`Queue::tick`]. On `epoll` file ops run here.
     pub fn push(&mut self, op: Op, user: u64) -> Result<Key, IoError> {
-        self.push_with(op, user, None, false)
+        self.push_with(op, user, None, false, false)
+    }
+
+    /// [`Queue::push`] of an entry the kernel hands to a worker from the start
+    /// (`IOSQE_ASYNC`) instead of trying it inline first. For an op expected to block, a
+    /// buffered read that misses the page cache say, so the submitter's `io_uring_enter`
+    /// does not wait it out. A hot op costs a wake and a context switch more this way, so
+    /// push one that will likely complete at once with [`Queue::push`]. Joins a
+    /// [`Queue::link`] chain as a push does. No effect on `epoll`.
+    pub fn push_punted(&mut self, op: Op, user: u64) -> Result<Key, IoError> {
+        self.push_with(op, user, None, false, true)
     }
 
     /// [`Queue::push`] of an entry on the caller's own behalf, a re-arm say, that never
     /// joins a [`Queue::link`] chain and leaves a pending link to the next push. While a
     /// chain is open it waits in its slot and goes out once the chain ends.
     pub fn push_apart(&mut self, op: Op, user: u64) -> Result<Key, IoError> {
-        self.push_with(op, user, None, true)
+        self.push_with(op, user, None, true, false)
     }
 
     /// Push a [`Op::SendMsg`] with `control` copied into the slot. At most [`CONTROL_ROOM`] bytes.
@@ -669,7 +681,7 @@ impl Queue {
                 max: CONTROL_ROOM,
             });
         }
-        self.push_with(op, user, Some(control), false)
+        self.push_with(op, user, Some(control), false, false)
     }
 
     /// Close `fd` as an operation. The queue owns it from here and never closes it again,
@@ -681,7 +693,7 @@ impl Queue {
     /// a [`Queue::link`] chain runs once the chain ends, whatever its outcome.
     pub fn close(&mut self, fd: OwnedFd, user: u64) -> Result<Key, CloseRefused> {
         let raw = fd.into_raw_fd();
-        self.push_with(Op::Close { fd: Closing(raw) }, user, None, false)
+        self.push_with(Op::Close { fd: Closing(raw) }, user, None, false, false)
             .map_err(|error| CloseRefused {
                 // SAFETY: just taken from an `OwnedFd`, and the op never ran.
                 fd: unsafe { OwnedFd::from_raw_fd(raw) },
@@ -689,15 +701,18 @@ impl Queue {
             })
     }
 
+    /// Inlined into each public push, so its constant arguments fold away.
+    #[inline(always)]
     fn push_with(
         &mut self,
         op: Op,
         user: u64,
         control: Option<&[u8]>,
         apart: bool,
+        punt: bool,
     ) -> Result<Key, IoError> {
         if self.chain != Chain::Closed || self.link {
-            return self.push_chained(op, user, control, apart);
+            return self.push_chained(op, user, control, apart, punt);
         }
         // No chain pending, so the entry goes straight out. A free slot carries no chain
         // state, see `free_slot`.
@@ -706,7 +721,7 @@ impl Queue {
         if let Some(bytes) = control {
             self.copy_control(i, &mut op, bytes);
         }
-        let key = self.arm(i, op, user);
+        let key = self.arm(i, op, user, punt);
         let pushed = match &mut self.engine {
             // SAFETY: slot `i` was free, so the kernel holds no pointer into its side.
             Engine::Uring(r) => r.push(
@@ -714,6 +729,7 @@ impl Queue {
                 unsafe { &mut *self.sides.at(i as usize) },
                 key,
                 false,
+                punt,
             ),
             Engine::Epoll(_) => {
                 self.start_epoll(i);
@@ -738,10 +754,11 @@ impl Queue {
         user: u64,
         control: Option<&[u8]>,
         apart: bool,
+        punt: bool,
     ) -> Result<Key, IoError> {
         // Taken first, so a refused push leaves no link for the next.
         let link = !apart && core::mem::take(&mut self.link);
-        let pushed = self.push_slot(op, user, control, apart, link);
+        let pushed = self.push_slot(op, user, control, apart, link, punt);
         if pushed.is_err() && !apart {
             // The chain lost its member, so it ends here.
             self.break_chain();
@@ -775,12 +792,12 @@ impl Queue {
 
     /// Take free slot `i` for `op`. Its chain fields keep what `free_slot` left.
     #[inline]
-    fn arm(&mut self, i: u32, op: Op, user: u64) -> Key {
+    fn arm(&mut self, i: u32, op: Op, user: u64, punt: bool) -> Key {
         let s = &mut self.slots[i as usize];
         self.free = s.next;
         (s.op, s.user, s.state, s.cancel, s.next, s.wait_next) =
             (op, user, State::Flying, false, NONE, NONE);
-        s.progress = 0;
+        (s.progress, s.punt) = (0, punt);
         let key = Key::new(i, s.generation);
         self.live += 1;
         if let Some(n) = group_of(&op).and_then(|g| self.groups.ops.get_mut(g)) {
@@ -796,6 +813,7 @@ impl Queue {
         control: Option<&[u8]>,
         apart: bool,
         link: bool,
+        punt: bool,
     ) -> Result<Key, IoError> {
         let i = self.take_slot(&op)?;
         // A broken chain ends before anything joins it. An entry apart may wait behind it.
@@ -819,7 +837,7 @@ impl Queue {
             // SAFETY: as above, slot `i` is free.
             uring::encode(&op, unsafe { &mut *side }, Key(0), uring::NO_FLAGS)?;
         }
-        let key = self.arm(i, op, user);
+        let key = self.arm(i, op, user, punt);
         let s = &mut self.slots[i as usize];
         s.after_chain = after;
         s.behind = if wait { Behind::Op } else { Behind::None };
@@ -832,7 +850,7 @@ impl Queue {
             Engine::Uring(r) => {
                 let sent = if after { &Op::Nop } else { &op };
                 // SAFETY: as above, slot `i` was free.
-                let pushed = r.push(sent, unsafe { &mut *side }, key, link);
+                let pushed = r.push(sent, unsafe { &mut *side }, key, link, punt);
                 if pushed.is_ok() && !apart {
                     closed = linked && !link;
                     self.chain = if link { Chain::Open } else { Chain::Closed };
@@ -914,7 +932,7 @@ impl Queue {
                 Behind::Op => {
                     let sent = if s.void { &Op::Nop } else { &s.op };
                     // SAFETY: the slot's own side, which no entry of the kernel names yet.
-                    r.push(sent, unsafe { &mut *self.sides.at(i) }, key, false)
+                    r.push(sent, unsafe { &mut *self.sides.at(i) }, key, false, s.punt)
                 }
                 Behind::Cancel => r.cancel(key),
             };

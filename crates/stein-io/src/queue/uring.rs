@@ -80,6 +80,7 @@ impl Ring {
 
     /// `side` belongs to a free slot, so nothing else touches it until the completion.
     /// The entry is built once, flags and user data included, and written to the ring.
+    /// `punt` asks for a worker from the start, as [`Setup::punt_reads`] does for reads.
     #[inline]
     pub(super) fn push(
         &mut self,
@@ -87,11 +88,12 @@ impl Ring {
         side: &mut Side,
         key: Key,
         link: bool,
+        punt: bool,
     ) -> Result<(), IoError> {
         if link {
-            return self.push_linked(op, side, key);
+            return self.push_linked(op, side, key, punt);
         }
-        let flags = if self.punt_reads && punted(op) {
+        let flags = if punt || (self.punt_reads && punted(op)) {
             squeue::Flags::ASYNC
         } else {
             squeue::Flags::empty()
@@ -102,9 +104,15 @@ impl Ring {
 
     /// [`Ring::push`] of an entry that carries `IO_LINK`, see [`encode_linked`].
     #[inline(never)]
-    fn push_linked(&mut self, op: &Op, side: &mut Side, key: Key) -> Result<(), IoError> {
+    fn push_linked(
+        &mut self,
+        op: &Op,
+        side: &mut Side,
+        key: Key,
+        punt: bool,
+    ) -> Result<(), IoError> {
         let mut flags = squeue::Flags::IO_LINK;
-        if self.punt_reads && punted(op) {
+        if punt || (self.punt_reads && punted(op)) {
             flags |= squeue::Flags::ASYNC;
         }
         let e = encode_linked(op, side, key, flags)?;

@@ -135,6 +135,7 @@ both!(
     a_symlink_is_stated_itself_unless_followed,
     a_burst_on_a_repeating_receive_comes_in_one_reap,
     punted_reads_land_where_they_were_asked,
+    a_punted_push_lands_alone_and_in_a_chain,
 );
 
 fn a_file_is_written_read_stat_renamed_and_unlinked(want: Want) {
@@ -562,6 +563,51 @@ fn punted_reads_land_where_they_were_asked(want: Want) {
     };
     assert_eq!(one(&mut q, read, 9).result(), Ok(16));
     assert_eq!(&head, &bytes[..16]);
+    drop(q);
+    let _ = std::fs::remove_file(&p);
+}
+
+/// A read pushed punted on a queue without `punt_reads` lands at its offset, alone and as
+/// the first member of a chain, and a punted nop completes like any other.
+fn a_punted_push_lands_alone_and_in_a_chain(want: Want) {
+    let p = tmp("punted-push", want);
+    let bytes: Vec<u8> = (0..32 * 1024u32).map(|i| (i % 239) as u8).collect();
+    std::fs::write(&p, &bytes).expect("fixture");
+    let file = std::fs::File::open(&p).expect("open");
+    let mut q = queue(want);
+    let fd = Fd::Raw(file.as_raw_fd());
+    let mut alone = [0u8; 4096];
+    let read = Op::Read {
+        fd,
+        mem: mem(&mut alone),
+        at: 20_000,
+    };
+    assert!(q.push_punted(read, 1).is_ok());
+    let mut seen = Vec::new();
+    assert_eq!(wait(&mut q, 1, &mut seen).result(), Ok(4096));
+    assert_eq!(&alone[..], &bytes[20_000..24_096]);
+    assert_eq!(one(&mut q, Op::Nop, 2).result(), Ok(0));
+    let (mut first, mut second) = ([0u8; 1024], [0u8; 1024]);
+    q.link();
+    let head = Op::Read {
+        fd,
+        mem: mem(&mut first),
+        at: 0,
+    };
+    let tail = Op::Read {
+        fd,
+        mem: mem(&mut second),
+        at: 1024,
+    };
+    q.push_punted(head, 3).expect("head");
+    q.push(tail, 4).expect("tail");
+    assert_eq!(wait(&mut q, 3, &mut seen).result(), Ok(1024));
+    assert_eq!(wait(&mut q, 4, &mut seen).result(), Ok(1024));
+    assert_eq!(&first[..], &bytes[..1024]);
+    assert_eq!(&second[..], &bytes[1024..2048]);
+    assert!(q.push_punted(Op::Nop, 5).is_ok());
+    assert_eq!(wait(&mut q, 5, &mut seen).result(), Ok(0));
+    assert_eq!(q.in_flight(), 0);
     drop(q);
     let _ = std::fs::remove_file(&p);
 }

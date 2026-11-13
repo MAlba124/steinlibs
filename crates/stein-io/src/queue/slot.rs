@@ -94,6 +94,8 @@ pub(super) struct Slot {
     pub(super) behind: Behind,
     /// Cancelled before it went out, so a nop goes in its place and it ends with `ECANCELED`.
     pub(super) void: bool,
+    /// Pushed by [`super::Queue::push_punted`], the entry carries `IOSQE_ASYNC`.
+    pub(super) punt: bool,
 }
 
 impl Slot {
@@ -115,6 +117,7 @@ impl Slot {
             after_chain: false,
             behind: Behind::None,
             void: false,
+            punt: false,
         }
     }
 }
