@@ -163,7 +163,7 @@ fn land_full(io: &mut Io) {
     };
     while io.q.push(wait, CLOSING + 1).is_ok() {}
     for c in &got[..n] {
-        io.complete(*c);
+        io.complete(c);
     }
 }
 

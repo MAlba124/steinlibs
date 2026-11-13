@@ -107,8 +107,9 @@ pub struct Io {
     mail: Option<(OwnedFd, OwnedFd)>,
     /// Reentrancy guard for [`Io::harvest`].
     harvesting: bool,
-    /// Queue key per slot for cancel, [`NO_KEY`] if none. Separate column keeps `Op` four words.
-    keys: Vec<u64>,
+    /// Queue key per slot for cancel, written once when the op's entry goes out. Separate
+    /// column keeps `Op` four words.
+    keys: Vec<Keyed>,
     /// Memory a [`Kind::SendShared`] reads, per slot.
     held: Vec<Option<Held>>,
     /// Held memory the kernel may still read after a cancel, keyed by user data.
@@ -207,7 +208,7 @@ impl Io {
             spans: Vec::with_capacity(slots),
             mail: None,
             harvesting: false,
-            keys: vec![NO_KEY; cap],
+            keys: vec![Keyed::NONE; cap],
             held: (0..cap).map(|_| None).collect(),
             held_quarantine: Vec::with_capacity(cap),
             wake: None,
@@ -401,17 +402,21 @@ impl Io {
         true
     }
 
+    /// The key of `id`'s entry. `None` for an op that never pushed one, as the slot still
+    /// holds an earlier occupant's. One whose entry ended keeps its key until the slot is
+    /// reused, so callers check `done` first, and the queue's generation makes a key of an
+    /// ended entry name nothing anyway.
     fn key_of(&self, id: OpId) -> Option<queue::Key> {
-        self.keys
-            .get(id.slot() as usize)
-            .copied()
-            .filter(|k| *k != NO_KEY)
-            .map(queue::Key)
+        let k = self.keys.get(id.slot() as usize)?;
+        (k.user == id.to_user_data()).then_some(queue::Key(k.key))
     }
 
-    fn set_key(&mut self, id: OpId, key: u64) {
+    fn set_key(&mut self, id: OpId, key: queue::Key) {
         if let Some(k) = self.keys.get_mut(id.slot() as usize) {
-            *k = key;
+            *k = Keyed {
+                key: key.0,
+                user: id.to_user_data(),
+            };
         }
     }
 
@@ -560,12 +565,14 @@ impl Io {
     }
 
     pub fn next_completion(&mut self) -> Option<Completion> {
-        let c = self.done.pop_front()?;
-        if c.is_final() && self.ops.get(c.op).is_some_and(|o| o.done) {
-            self.take_op(c.op);
+        // Read in place, popped once straight to the caller.
+        let c = self.done.front()?;
+        let (last, id) = (c.is_final(), c.op);
+        if last && self.ops.get(id).is_some_and(|o| o.done) {
+            self.take_op(id);
             self.retired -= 1;
         }
-        Some(c)
+        self.done.pop_front()
     }
 
     /// Wait for activity. Returns queued completion count.
@@ -593,7 +600,7 @@ impl Io {
                 break;
             }
             for c in &got[..n] {
-                self.complete(*c);
+                self.complete(c);
             }
         }
         self.scratch = got;
@@ -651,7 +658,7 @@ impl Io {
     }
 
     fn submitted(&mut self, id: OpId, key: queue::Key, chained: bool) {
-        self.set_key(id, key.0);
+        self.set_key(id, key);
         if chained {
             self.note_chained(id);
         }
@@ -665,7 +672,7 @@ impl Io {
         }
     }
 
-    fn complete(&mut self, c: Cqe) {
+    fn complete(&mut self, c: &Cqe) {
         if c.is_posted() {
             return self.deliver_msg(c.user);
         }
@@ -680,22 +687,17 @@ impl Io {
             self.unspan(c.user);
         }
         let id = OpId::from_user_data(c.user);
-        if !self.is_live(id) {
-            // Cancelled or finished. The generation makes this a miss, not a hit on the reused slot.
-            self.reap_stale(c);
-            return;
-        }
-        let Some(op) = self.ops.get(id).copied() else {
-            return;
+        // Cancelled or finished otherwise. The generation makes a stale id a miss, not a
+        // hit on the reused slot.
+        let op = match self.ops.get(id) {
+            Some(op) if !op.done => *op,
+            _ => return self.reap_stale(c),
         };
-        if !c.more() {
-            self.set_key(id, NO_KEY);
-        }
         self.apply(id, op, c);
     }
 
     /// Release what a forgotten op's completion still holds.
-    fn reap_stale(&mut self, c: Cqe) {
+    fn reap_stale(&mut self, c: &Cqe) {
         // A cancelled receive may still have been handed a ring buffer.
         self.offer_again(c.flags);
         if c.more() {
@@ -725,7 +727,7 @@ impl Io {
         }
     }
 
-    fn apply(&mut self, id: OpId, op: Op, c: Cqe) {
+    fn apply(&mut self, id: OpId, op: Op, c: &Cqe) {
         let res = c.res;
         match op.kind {
             Kind::Timeout => self.done_timeout(id, res),
@@ -744,7 +746,7 @@ impl Io {
 
     /// Cold kinds, out of line so [`Io::apply`] stays small enough to inline (measured).
     #[inline(never)]
-    fn apply_rest(&mut self, id: OpId, op: Op, c: Cqe) {
+    fn apply_rest(&mut self, id: OpId, op: Op, c: &Cqe) {
         match op.kind {
             Kind::Fallocate
             | Kind::Sync
@@ -886,11 +888,16 @@ impl Io {
 
     fn insert(&mut self, op: Op) -> Result<OpId, IoError> {
         let id = self.ops.insert(op).ok_or(IoError::OpsFull)?;
-        self.set_key(id, NO_KEY);
-        for fd in fds_of(&op) {
-            self.count_on(fd, true);
-        }
+        self.count_fds(&op, true);
         Ok(id)
+    }
+
+    /// [`Io::count_on`] for every descriptor `op` names.
+    fn count_fds(&mut self, op: &Op, more: bool) {
+        self.count_on(op.fd, more);
+        if op.kind == Kind::Splice {
+            self.count_on(op.aux as RawFd, more);
+        }
     }
 
     /// One more or one less live op on `fd`. Every change of an op's fd goes through here
@@ -949,9 +956,7 @@ impl Io {
         if let Some(h) = self.held.get_mut(id.slot() as usize) {
             *h = None;
         }
-        for fd in fds_of(&op) {
-            self.count_on(fd, false);
-        }
+        self.count_fds(&op, false);
         Some(op)
     }
 
@@ -1054,6 +1059,22 @@ pub(crate) const MAIL: u64 = u64::MAX;
 pub(crate) const WAKE: u64 = u64::MAX - 1;
 /// No queue entry.
 pub(crate) const NO_KEY: u64 = u64::MAX;
+
+/// A slot's queue key and the op it belongs to, see [`Io::key_of`].
+#[derive(Clone, Copy)]
+struct Keyed {
+    key: u64,
+    /// User data of the op that pushed the entry.
+    user: u64,
+}
+
+impl Keyed {
+    /// Matches no op, as no handle has generation zero.
+    const NONE: Keyed = Keyed {
+        key: NO_KEY,
+        user: 0,
+    };
+}
 /// Open `aux`, a stat waits on it with its handle in `offset`.
 /// Stat `aux`, it is that stat and has no kernel entry.
 const STAT_WAITS: u32 = 1;

@@ -101,7 +101,7 @@ fn check_a_failed_poll_of_its_own_is_not_rearmed(back: Backend) {
     let _w = io.waker().expect("waker");
     let flying = io.q.in_flight();
     let bad = -Errno::BADF.raw_os_error();
-    io.complete(Cqe {
+    io.complete(&Cqe {
         user: WAKE,
         res: bad,
         flags: 0,
@@ -121,7 +121,7 @@ fn check_a_failed_poll_of_its_own_is_not_rearmed(back: Backend) {
     }
     let _m = io.mailbox().expect("mailbox");
     let flying = io.q.in_flight();
-    io.complete(Cqe {
+    io.complete(&Cqe {
         user: MAIL,
         res: bad,
         flags: 0,

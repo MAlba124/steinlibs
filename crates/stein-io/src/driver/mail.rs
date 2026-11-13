@@ -216,7 +216,7 @@ impl Io {
     }
 
     /// Driver's own close or mailbox poll. A close needs nothing, the queue owns its fd.
-    pub(super) fn own_entry(&mut self, c: Cqe) {
+    pub(super) fn own_entry(&mut self, c: &Cqe) {
         if c.user == WAKE {
             return self.woken(c.res);
         }

@@ -168,7 +168,7 @@ fn check_a_waker_that_cannot_rearm_says_so(back: Backend) {
     w.wake();
     let c = intercept(&mut io, WAKE);
     let keys = fill_queue(&mut io);
-    io.complete(c);
+    io.complete(&c);
     let got = io.next_completion().expect("a wake");
     assert_eq!(got.kind, Kind::Wake);
     assert!(got.result.is_err(), "{back:?} a lost re-arm read as a wake");
@@ -191,7 +191,7 @@ fn a_mailbox_that_cannot_rearm_says_so() {
     sender.post(p, 7).expect("post");
     let c = intercept(&mut io, MAIL);
     let keys = fill_queue(&mut io);
-    io.complete(c);
+    io.complete(&c);
     let first = io.next_completion().expect("the value");
     assert_eq!((first.kind, first.op.to_user_data()), (Kind::Msg, 7));
     let failed = io.next_completion().expect("the failure");
@@ -215,7 +215,7 @@ fn a_failed_waker_poll_forgets_its_number() {
     w.wake();
     let mut c = intercept(&mut io, WAKE);
     c.res = -Errno::BADF.raw_os_error();
-    io.complete(c);
+    io.complete(&c);
     let got = io.next_completion().expect("the failure");
     assert!(got.result.is_err());
     assert!(!io.q.is_watched(fd), "epoll kept the closed number's watch");

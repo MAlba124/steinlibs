@@ -94,7 +94,7 @@ impl Io {
         Ok(id)
     }
 
-    pub(super) fn done_accept(&mut self, id: OpId, op: Op, c: Cqe) {
+    pub(super) fn done_accept(&mut self, id: OpId, op: Op, c: &Cqe) {
         if c.res < 0 {
             return self.retire(id, Err(Errno::from_raw_os_error(-c.res)), None);
         }
@@ -150,7 +150,7 @@ impl Io {
         self.push_op(id, queue::Op::Recv { fd: raw(fd), mem }, own)
     }
 
-    pub(super) fn done_recv(&mut self, id: OpId, op: Op, c: Cqe) {
+    pub(super) fn done_recv(&mut self, id: OpId, op: Op, c: &Cqe) {
         let Some(bid) = op.buf else {
             // Kernel picked from the ring.
             return self.done_selected(id, op, c);
@@ -174,7 +174,7 @@ impl Io {
     }
 
     /// Receive on a kernel-picked ring buffer.
-    fn done_selected(&mut self, id: OpId, op: Op, c: Cqe) {
+    fn done_selected(&mut self, id: OpId, op: Op, c: &Cqe) {
         if c.res < 0 {
             return self.selected_failed(id, c);
         }
@@ -192,7 +192,7 @@ impl Io {
         }
     }
 
-    fn selected_failed(&mut self, id: OpId, c: Cqe) {
+    fn selected_failed(&mut self, id: OpId, c: &Cqe) {
         // ENOBUFS ends the submission, not the connection. Rearm later.
         if -c.res == Errno::NOBUFS.raw_os_error() {
             return self.rearm.push(id);
@@ -381,7 +381,7 @@ impl Io {
         self.push_op(id, queue::Op::RecvFrom { fd: raw(fd), mem }, own)
     }
 
-    pub(super) fn done_recvfrom(&mut self, id: OpId, op: Op, c: Cqe) {
+    pub(super) fn done_recvfrom(&mut self, id: OpId, op: Op, c: &Cqe) {
         let Some(bid) = op.buf else {
             return;
         };
@@ -675,7 +675,7 @@ impl Io {
         msg::parse_named(self.bufs.filled(b))
     }
 
-    pub(super) fn done_recvmsg(&mut self, id: OpId, op: Op, c: Cqe) {
+    pub(super) fn done_recvmsg(&mut self, id: OpId, op: Op, c: &Cqe) {
         if c.res < 0 {
             return self.selected_failed(id, c);
         }
