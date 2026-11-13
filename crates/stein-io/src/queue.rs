@@ -709,7 +709,12 @@ impl Queue {
         let key = self.arm(i, op, user);
         let pushed = match &mut self.engine {
             // SAFETY: slot `i` was free, so the kernel holds no pointer into its side.
-            Engine::Uring(r) => r.push(op, unsafe { &mut *self.sides.at(i as usize) }, key, false),
+            Engine::Uring(r) => r.push(
+                &self.slots[i as usize].op,
+                unsafe { &mut *self.sides.at(i as usize) },
+                key,
+                false,
+            ),
             Engine::Epoll(_) => {
                 self.start_epoll(i);
                 Ok(())
@@ -810,8 +815,9 @@ impl Queue {
         // Apart from an open chain it waits, so what the ring would refuse is refused now.
         let wait = apart && linked;
         if wait {
+            // Only the error matters, the entry goes out later with its own key.
             // SAFETY: as above, slot `i` is free.
-            uring::encode(op, unsafe { &mut *side })?;
+            uring::encode(&op, unsafe { &mut *side }, Key(0), uring::NO_FLAGS)?;
         }
         let key = self.arm(i, op, user);
         let s = &mut self.slots[i as usize];
@@ -824,7 +830,7 @@ impl Queue {
                 Ok(())
             }
             Engine::Uring(r) => {
-                let sent = if after { Op::Nop } else { op };
+                let sent = if after { &Op::Nop } else { &op };
                 // SAFETY: as above, slot `i` was free.
                 let pushed = r.push(sent, unsafe { &mut *side }, key, link);
                 if pushed.is_ok() && !apart {
@@ -906,7 +912,7 @@ impl Queue {
             let pushed = match s.behind {
                 Behind::None => continue,
                 Behind::Op => {
-                    let sent = if s.void { Op::Nop } else { s.op };
+                    let sent = if s.void { &Op::Nop } else { &s.op };
                     // SAFETY: the slot's own side, which no entry of the kernel names yet.
                     r.push(sent, unsafe { &mut *self.sides.at(i) }, key, false)
                 }

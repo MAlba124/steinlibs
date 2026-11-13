@@ -86,8 +86,8 @@ enum Try {
 
 impl Queue {
     pub(super) fn start_epoll(&mut self, i: u32) {
-        let op = self.slots[i as usize].op;
-        match op {
+        // Matched in place, the arms copy only the fields they bind.
+        match self.slots[i as usize].op {
             Op::Timeout { after } => {
                 // Clamped first, so no deadline overflows the clock and panics.
                 let Some(at) = Instant::now().checked_add(after.min(FOREVER)) else {
@@ -101,7 +101,8 @@ impl Queue {
                 self.finish(i, -Errno::OPNOTSUPP.raw_os_error(), 0, true)
             }
             Op::Read { at, .. } | Op::Write { at, .. } if at != POSITION => {
-                self.finish(i, file(op), 0, true)
+                let r = file(&self.slots[i as usize].op);
+                self.finish(i, r, 0, true)
             }
             Op::Close { fd } => {
                 self.forget(fd.raw());
@@ -112,17 +113,16 @@ impl Queue {
             | Op::Open2 { .. }
             | Op::Statx { .. }
             | Op::Rename { .. }
-            | Op::Unlink { .. } => {
-                self.finish(i, file(op), 0, true);
-            }
-            Op::Fsync { .. }
+            | Op::Unlink { .. }
+            | Op::Fsync { .. }
             | Op::SyncFileRange { .. }
             | Op::Fadvise { .. }
             | Op::Fallocate { .. }
-            | Op::Truncate { .. } => {
-                self.finish(i, file(op), 0, true);
+            | Op::Truncate { .. }
+            | Op::SetSockOpt { .. } => {
+                let r = file(&self.slots[i as usize].op);
+                self.finish(i, r, 0, true);
             }
-            Op::SetSockOpt { .. } => self.finish(i, file(op), 0, true),
             Op::Connect { fd, to } => self.connect(i, fd, to),
             _ => self.stream(i),
         }
@@ -829,8 +829,8 @@ fn repeat(r: i32, multi: bool, flags: u32) -> Try {
 }
 
 /// Run a file op synchronously.
-fn file(op: Op) -> i32 {
-    match op {
+fn file(op: &Op) -> i32 {
+    match *op {
         Op::Nop => 0,
         Op::Read { fd, mem, at } => sys::pread(raw(fd), mem, at),
         Op::Write { fd, mem, at } => sys::pwrite(raw(fd), mem, at),

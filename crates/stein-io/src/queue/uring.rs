@@ -22,6 +22,8 @@ const CQ_FACTOR: u32 = 4;
 /// `FUTEX2_SIZE_U32 | FUTEX2_PRIVATE`.
 const FUTEX2_U32_PRIVATE: u32 = 0x02 | 128;
 const NOSIGNAL: u32 = libc::MSG_NOSIGNAL as u32;
+/// No submission flags.
+pub(super) const NO_FLAGS: squeue::Flags = squeue::Flags::empty();
 const ACCEPT_FLAGS: i32 = libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC;
 
 /// What a reap reads and frees, borrowed from the queue.
@@ -77,23 +79,35 @@ impl Ring {
     }
 
     /// `side` belongs to a free slot, so nothing else touches it until the completion.
+    /// The entry is built once, flags and user data included, and written to the ring.
+    #[inline]
     pub(super) fn push(
         &mut self,
-        op: Op,
+        op: &Op,
         side: &mut Side,
         key: Key,
         link: bool,
     ) -> Result<(), IoError> {
-        let punt = self.punt_reads && matches!(op, Op::Read { at, .. } if at != super::POSITION);
-        let mut e = if link {
-            encode_linked(op, side)?.flags(squeue::Flags::IO_LINK)
+        if link {
+            return self.push_linked(op, side, key);
+        }
+        let flags = if self.punt_reads && punted(op) {
+            squeue::Flags::ASYNC
         } else {
-            encode(op, side)?
+            squeue::Flags::empty()
+        };
+        let e = encode(op, side, key, flags)?;
+        self.queue(&e)
+    }
+
+    /// [`Ring::push`] of an entry that carries `IO_LINK`, see [`encode_linked`].
+    #[inline(never)]
+    fn push_linked(&mut self, op: &Op, side: &mut Side, key: Key) -> Result<(), IoError> {
+        let mut flags = squeue::Flags::IO_LINK;
+        if self.punt_reads && punted(op) {
+            flags |= squeue::Flags::ASYNC;
         }
-        .user_data(key.0);
-        if punt {
-            e = e.flags(squeue::Flags::ASYNC);
-        }
+        let e = encode_linked(op, side, key, flags)?;
         self.queue(&e)
     }
 
@@ -108,15 +122,21 @@ impl Ring {
         self.queue(&e)
     }
 
+    #[inline]
     fn queue(&mut self, e: &squeue::Entry) -> Result<(), IoError> {
         // SAFETY: entries point at pinned slot headers or `Mem`-vouched memory,
         // both outliving the completion.
         if unsafe { self.ring.submission().push(e) }.is_ok() {
             return Ok(());
         }
-        // SQ full, submit to make room.
+        self.queue_full(e)
+    }
+
+    /// SQ full, submit to make room and push again.
+    #[inline(never)]
+    fn queue_full(&mut self, e: &squeue::Entry) -> Result<(), IoError> {
         self.ring.submit().map_err(errno_of)?;
-        // SAFETY: as above.
+        // SAFETY: as in `queue`.
         unsafe { self.ring.submission().push(e) }.map_err(|_| IoError::OpsFull)
     }
 
@@ -373,9 +393,22 @@ macro_rules! on {
     };
 }
 
-/// Headers the kernel reads go into the slot's side.
-pub(super) fn encode(op: Op, side: &mut Side) -> Result<squeue::Entry, IoError> {
-    Ok(match op {
+/// Whether a read gets `IOSQE_ASYNC` under [`Setup::punt_reads`], a positioned one.
+#[inline]
+fn punted(op: &Op) -> bool {
+    matches!(*op, Op::Read { at, .. } if at != super::POSITION)
+}
+
+/// The entry for `op` tagged `key`, with `flags`. Headers the kernel reads go into the
+/// slot's side. Inlined so the entry is built in place once and written to the ring.
+#[inline]
+pub(super) fn encode(
+    op: &Op,
+    side: &mut Side,
+    key: Key,
+    flags: squeue::Flags,
+) -> Result<squeue::Entry, IoError> {
+    let e = match *op {
         Op::Nop => opcode::Nop::new().build(),
         Op::Read { fd, mem, at } => read(fd, mem, at),
         Op::Write { fd, mem, at } => write(fd, mem, at),
@@ -458,23 +491,37 @@ pub(super) fn encode(op: Op, side: &mut Side) -> Result<squeue::Entry, IoError> 
         Op::Poll { fd, events, multi } => {
             on!(fd, f => opcode::PollAdd::new(f, events).multi(multi).build())
         }
-        _ => return encode_file(op, side),
-    })
+        _ => return encode_file(op, side, key, flags),
+    };
+    Ok(e.user_data(key.0).flags(flags))
 }
 
 /// [`encode`] of an entry that carries `IO_LINK`. A send waits for all its bytes, so a
 /// short one on a stream fails the link and the next send cannot start before the rest.
 /// A datagram or `SEQPACKET` send is whole or fails, so the flag changes nothing there.
-fn encode_linked(op: Op, side: &mut Side) -> Result<squeue::Entry, IoError> {
-    let Op::Send { fd, mem } = op else {
-        return encode(op, side);
+fn encode_linked(
+    op: &Op,
+    side: &mut Side,
+    key: Key,
+    flags: squeue::Flags,
+) -> Result<squeue::Entry, IoError> {
+    let Op::Send { fd, mem } = *op else {
+        return encode(op, side, key, flags);
     };
-    let flags = NOSIGNAL as i32 | libc::MSG_WAITALL;
-    Ok(on!(fd, f => opcode::Send::new(f, mem.ptr, mem.len).flags(flags).build()))
+    let send = NOSIGNAL as i32 | libc::MSG_WAITALL;
+    let e = on!(fd, f => opcode::Send::new(f, mem.ptr, mem.len).flags(send).build());
+    Ok(e.user_data(key.0).flags(flags))
 }
 
-fn encode_file(op: Op, side: &mut Side) -> Result<squeue::Entry, IoError> {
-    Ok(match op {
+/// The colder kinds of [`encode`], out of line.
+#[inline(never)]
+fn encode_file(
+    op: &Op,
+    side: &mut Side,
+    key: Key,
+    flags: squeue::Flags,
+) -> Result<squeue::Entry, IoError> {
+    let e = match *op {
         Op::Close { fd } => opcode::Close::new(types::Fd(fd.raw())).build(),
         Op::Fallocate { fd, at, len } => {
             on!(fd, f => opcode::Fallocate::new(f, len).offset(at).build())
@@ -498,16 +545,19 @@ fn encode_file(op: Op, side: &mut Side) -> Result<squeue::Entry, IoError> {
             opcode::SetSockOpt::new(f, level, name, value.ptr.cast(), value.len).build()
         }),
         Op::Fsync { fd, data_only } => {
-            let flags = if data_only {
+            let how = if data_only {
                 types::FsyncFlags::DATASYNC
             } else {
                 types::FsyncFlags::empty()
             };
-            on!(fd, f => opcode::Fsync::new(f).flags(flags).build())
+            on!(fd, f => opcode::Fsync::new(f).flags(how).build())
         }
-        Op::SyncFileRange { fd, at, len, flags } => {
-            on!(fd, f => opcode::SyncFileRange::new(f, len).offset(at).flags(flags).build())
-        }
+        Op::SyncFileRange {
+            fd,
+            at,
+            len,
+            flags: how,
+        } => on!(fd, f => opcode::SyncFileRange::new(f, len).offset(at).flags(how).build()),
         Op::Fadvise {
             fd,
             at,
@@ -532,12 +582,18 @@ fn encode_file(op: Op, side: &mut Side) -> Result<squeue::Entry, IoError> {
         Op::Post { ring, value } => {
             opcode::MsgRingData::new(types::Fd(ring), POSTED, value, None).build()
         }
-        _ => return encode_path(op, side),
-    })
+        _ => return encode_path(op, side, key, flags),
+    };
+    Ok(e.user_data(key.0).flags(flags))
 }
 
 /// Ops naming paths, read by the kernel as C strings.
-fn encode_path(op: Op, side: &mut Side) -> Result<squeue::Entry, IoError> {
+fn encode_path(
+    op: &Op,
+    side: &mut Side,
+    key: Key,
+    flags: squeue::Flags,
+) -> Result<squeue::Entry, IoError> {
     let cstr = |m: Mem| -> *const libc::c_char {
         if m.len == 0 {
             c"".as_ptr()
@@ -545,25 +601,25 @@ fn encode_path(op: Op, side: &mut Side) -> Result<squeue::Entry, IoError> {
             m.ptr.cast()
         }
     };
-    Ok(match op {
+    let e = match *op {
         Op::Open {
             dir,
             path,
-            flags,
+            flags: open,
             mode,
         } => opcode::OpenAt::new(types::Fd(dir), cstr(path))
-            .flags(flags.bits() as i32)
+            .flags(open.bits() as i32)
             .mode(mode.bits())
             .build(),
         Op::Open2 {
             dir,
             path,
-            flags,
+            flags: open,
             mode,
             resolve,
         } => {
             // The kernel copies it at submission, the side outlives that.
-            side.how = open_how(flags, mode, resolve);
+            side.how = open_how(open, mode, resolve);
             let how: *const types::OpenHow = &side.how;
             opcode::OpenAt2::new(types::Fd(dir), cstr(path), how).build()
         }
@@ -573,9 +629,9 @@ fn encode_path(op: Op, side: &mut Side) -> Result<squeue::Entry, IoError> {
             out,
             follow,
         } => {
-            let flags = statx_flags(path.len == 0, follow);
+            let at = statx_flags(path.len == 0, follow);
             opcode::Statx::new(types::Fd(dir), cstr(path), out.ptr.cast())
-                .flags(flags)
+                .flags(at)
                 .mask(super::STATX_MASK)
                 .build()
         }
@@ -587,13 +643,14 @@ fn encode_path(op: Op, side: &mut Side) -> Result<squeue::Entry, IoError> {
         } => opcode::RenameAt::new(types::Fd(from_dir), cstr(from), types::Fd(to_dir), cstr(to))
             .build(),
         Op::Unlink { dir, path, rmdir } => {
-            let flags = if rmdir { libc::AT_REMOVEDIR } else { 0 };
+            let at = if rmdir { libc::AT_REMOVEDIR } else { 0 };
             opcode::UnlinkAt::new(types::Fd(dir), cstr(path))
-                .flags(flags)
+                .flags(at)
                 .build()
         }
         _ => return Err(IoError::Unsupported),
-    })
+    };
+    Ok(e.user_data(key.0).flags(flags))
 }
 
 pub(super) fn open_how(flags: OFlags, mode: Mode, resolve: ResolveFlags) -> types::OpenHow {
