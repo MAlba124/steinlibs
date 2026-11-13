@@ -696,6 +696,44 @@ impl Queue {
         control: Option<&[u8]>,
         apart: bool,
     ) -> Result<Key, IoError> {
+        if self.chain != Chain::Closed || self.link {
+            return self.push_chained(op, user, control, apart);
+        }
+        // No chain pending, so the entry goes straight out. A free slot carries no chain
+        // state, see `free_slot`.
+        let mut op = op;
+        let i = self.take_slot(&op)?;
+        if let Some(bytes) = control {
+            self.copy_control(i, &mut op, bytes);
+        }
+        let key = self.arm(i, op, user);
+        let pushed = match &mut self.engine {
+            // SAFETY: slot `i` was free, so the kernel holds no pointer into its side.
+            Engine::Uring(r) => r.push(op, unsafe { &mut *self.sides.at(i as usize) }, key, false),
+            Engine::Epoll(_) => {
+                self.start_epoll(i);
+                Ok(())
+            }
+        };
+        if let Err(e) = pushed {
+            self.release(i);
+            return Err(e);
+        }
+        if !apart {
+            self.pushes = self.pushes.wrapping_add(1);
+        }
+        Ok(key)
+    }
+
+    /// [`Queue::push_with`] while a [`Queue::link`] is pending or a chain is open or broken.
+    #[inline(never)]
+    fn push_chained(
+        &mut self,
+        op: Op,
+        user: u64,
+        control: Option<&[u8]>,
+        apart: bool,
+    ) -> Result<Key, IoError> {
         // Taken first, so a refused push leaves no link for the next.
         let link = !apart && core::mem::take(&mut self.link);
         let pushed = self.push_slot(op, user, control, apart, link);
@@ -706,6 +744,46 @@ impl Queue {
         pushed
     }
 
+    /// Validate `op` and find it a free slot, not taken yet.
+    #[inline]
+    fn take_slot(&mut self, op: &Op) -> Result<u32, IoError> {
+        self.check(op)?;
+        let i = self.free;
+        if i == NONE {
+            return Err(IoError::OpsFull);
+        }
+        Ok(i)
+    }
+
+    /// Copy `bytes` into free slot `i`'s control room and point the op's `control` at it.
+    #[inline(never)]
+    fn copy_control(&mut self, i: u32, op: &mut Op, bytes: &[u8]) {
+        let Op::SendMsg { control: room, .. } = op else {
+            return;
+        };
+        // SAFETY: slot `i` is free, so the kernel holds no pointer into its side.
+        let c = unsafe { &mut (*self.sides.at(i as usize)).control.0 };
+        c[..bytes.len()].copy_from_slice(bytes);
+        // SAFETY: the slot's own room, untouched while the op is in flight.
+        *room = unsafe { Mem::raw(c.as_mut_ptr(), bytes.len()) };
+    }
+
+    /// Take free slot `i` for `op`. Its chain fields keep what `free_slot` left.
+    #[inline]
+    fn arm(&mut self, i: u32, op: Op, user: u64) -> Key {
+        let s = &mut self.slots[i as usize];
+        self.free = s.next;
+        (s.op, s.user, s.state, s.cancel, s.next, s.wait_next) =
+            (op, user, State::Flying, false, NONE, NONE);
+        s.progress = 0;
+        let key = Key::new(i, s.generation);
+        self.live += 1;
+        if let Some(n) = group_of(&op).and_then(|g| self.groups.ops.get_mut(g)) {
+            *n += 1;
+        }
+        key
+    }
+
     fn push_slot(
         &mut self,
         mut op: Op,
@@ -714,25 +792,17 @@ impl Queue {
         apart: bool,
         link: bool,
     ) -> Result<Key, IoError> {
-        self.check(&op)?;
-        let i = self.free;
-        if i == NONE {
-            return Err(IoError::OpsFull);
-        }
+        let i = self.take_slot(&op)?;
         // A broken chain ends before anything joins it. An entry apart may wait behind it.
         if let Err(e) = self.mend()
             && !apart
         {
             return Err(e);
         }
-        let side = self.sides.at(i as usize);
-        if let (Some(bytes), Op::SendMsg { control: room, .. }) = (control, &mut op) {
-            // SAFETY: slot `i` is free, so the kernel holds no pointer into its side.
-            let c = unsafe { &mut (*side).control.0 };
-            c[..bytes.len()].copy_from_slice(bytes);
-            // SAFETY: the slot's own room, untouched while the op is in flight.
-            *room = unsafe { Mem::raw(c.as_mut_ptr(), bytes.len()) };
+        if let Some(bytes) = control {
+            self.copy_control(i, &mut op, bytes);
         }
+        let side = self.sides.at(i as usize);
         let linked = self.chain != Chain::Closed;
         // A close in a chain is cancelled with it and never runs, so a nop takes its place
         // and the close runs when the nop lands.
@@ -743,17 +813,10 @@ impl Queue {
             // SAFETY: as above, slot `i` is free.
             uring::encode(op, unsafe { &mut *side })?;
         }
+        let key = self.arm(i, op, user);
         let s = &mut self.slots[i as usize];
-        self.free = s.next;
-        (s.op, s.user, s.state, s.cancel, s.next, s.wait_next) =
-            (op, user, State::Flying, false, NONE, NONE);
-        (s.progress, s.after_chain, s.void) = (0, after, false);
+        s.after_chain = after;
         s.behind = if wait { Behind::Op } else { Behind::None };
-        let key = Key::new(i, s.generation);
-        self.live += 1;
-        if let Some(n) = group_of(&op).and_then(|g| self.groups.ops.get_mut(g)) {
-            *n += 1;
-        }
         let mut closed = false;
         let pushed = match &mut self.engine {
             Engine::Uring(_) if wait => {
@@ -815,8 +878,17 @@ impl Queue {
     /// A submit or tick ends a chain left open with a nop and drops a pending link, so
     /// what waits behind it goes out.
     fn close_chain(&mut self) {
+        if self.chain == Chain::Closed && !self.link && self.behind == 0 {
+            return;
+        }
         self.break_chain();
         self.flush_behind();
+    }
+
+    /// A [`Queue::link`] is pending or a chain is open or broken, so a call that pushes
+    /// nothing must end it. Nothing to end otherwise.
+    pub(crate) fn chain_pending(&self) -> bool {
+        self.link || self.chain != Chain::Closed
     }
 
     /// Push what waited for a chain to close. What the ring refuses waits for the next
@@ -1568,10 +1640,12 @@ impl Groups {
 }
 
 /// Free slot `i` and bump its generation. One whose generation wraps retires instead, as a
-/// reuse would let a key from 2^32 uses ago name the new op.
+/// reuse would let a key from 2^32 uses ago name the new op. Clears the chain fields, so a
+/// push that joins no chain leaves them alone.
 fn free_slot(slots: &mut [Slot], free: &mut u32, retired: &mut u32, i: u32) {
     let s = &mut slots[i as usize];
     (s.state, s.op, s.behind) = (State::Free, Op::Nop, Behind::None);
+    (s.after_chain, s.void) = (false, false);
     s.generation = s.generation.wrapping_add(1);
     if s.generation == 0 {
         s.next = NONE;

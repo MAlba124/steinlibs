@@ -605,7 +605,8 @@ impl Io {
     fn call<T>(&mut self, f: impl FnOnce(&mut Io) -> Result<T, IoError>) -> Result<T, IoError> {
         let before = self.q.pushes();
         let r = f(self);
-        if r.is_err() || self.q.pushes() == before {
+        // With no chain pending there is nothing to break.
+        if self.q.chain_pending() && (r.is_err() || self.q.pushes() == before) {
             self.q.break_chain();
         }
         r
