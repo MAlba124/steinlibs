@@ -69,15 +69,17 @@ impl Bump {
         self.len.set(0);
     }
 
+    /// `align` is a power of two, so the round up is a mask, not a divide.
     fn take(&self, len: usize, align: usize) -> Result<usize, ArenaError> {
         let align = align.max(1);
-        let at = self.len.get();
-        let rem = at % align;
-        let at = if rem == 0 { at } else { at + (align - rem) };
-        let end = at.checked_add(len).ok_or(ArenaError::Full {
+        debug_assert!(align.is_power_of_two(), "align {align}");
+        let full = || ArenaError::Full {
             asked: len,
             left: self.cap - self.len.get(),
-        })?;
+        };
+        let at = self.len.get();
+        let at = at.checked_add(align - 1).ok_or_else(full)? & !(align - 1);
+        let end = at.checked_add(len).ok_or_else(full)?;
         if end > self.cap {
             return Err(ArenaError::Full {
                 asked: len,
@@ -101,7 +103,8 @@ impl Bump {
         Ok(at)
     }
 
-    /// Raw `len` bytes at `align`, contents unspecified. For allocator shims.
+    /// Raw `len` bytes at `align`, a power of two, contents unspecified. For allocator
+    /// shims.
     pub fn alloc_raw(&self, len: usize, align: usize) -> Result<NonNull<u8>, ArenaError> {
         let at = self.take(len, align)?;
         // SAFETY: inside the mapping, base is never null.
@@ -205,6 +208,33 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
+
+    #[test]
+    fn raw_allocations_round_up_to_their_alignment() {
+        let b = Bump::reserve(1 << 16).unwrap();
+        for align in [1usize, 2, 8, 64, 4096] {
+            // Three bytes in, then one aligned, so the gap is exactly the round up.
+            let p = b.alloc_raw(3, 1).unwrap().as_ptr() as usize;
+            let q = b.alloc_raw(1, align).unwrap().as_ptr() as usize;
+            assert_eq!(q % align, 0, "align {align}");
+            assert!(q >= p + 3 && q - (p + 3) < align, "align {align}");
+        }
+    }
+
+    #[test]
+    fn a_take_past_the_capacity_is_full_not_wild() {
+        let b = Bump::reserve(1 << 12).unwrap();
+        let cap = b.capacity();
+        assert!(b.alloc_raw(cap - 1, 1).is_ok());
+        // One byte left, an aligned take of it needs a gap it does not have.
+        assert!(matches!(b.alloc_raw(1, 64), Err(ArenaError::Full { .. })));
+        assert!(b.alloc_raw(1, 1).is_ok());
+        assert!(matches!(b.alloc_raw(1, 1), Err(ArenaError::Full { .. })));
+        assert!(matches!(
+            b.alloc_raw(usize::MAX, 8),
+            Err(ArenaError::Full { .. })
+        ));
+    }
 
     #[test]
     fn slices_are_disjoint_aligned_and_zero() {

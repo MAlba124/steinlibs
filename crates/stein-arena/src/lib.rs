@@ -187,12 +187,10 @@ fn page() -> usize {
     rustix::param::page_size()
 }
 
+/// `v` rounded up to a multiple of `to`, a power of two, `None` past `usize::MAX`.
 fn round_up(v: usize, to: usize) -> Option<usize> {
-    let m = v % to;
-    if m == 0 {
-        return Some(v);
-    }
-    v.checked_add(to - m)
+    debug_assert!(to.is_power_of_two(), "round to {to}");
+    Some(v.checked_add(to - 1)? & !(to - 1))
 }
 
 pub mod bump;

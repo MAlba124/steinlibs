@@ -3,6 +3,42 @@
 use super::*;
 
 #[test]
+fn round_up_matches_the_divide_and_stops_at_the_top() {
+    for to in [1usize, 2, 8, 64, 4096, 1 << 20] {
+        for v in [
+            0usize,
+            1,
+            3,
+            7,
+            8,
+            9,
+            4095,
+            4096,
+            4097,
+            123_456_789,
+            usize::MAX - 4096,
+        ] {
+            let m = v % to;
+            let want = if m == 0 {
+                Some(v)
+            } else {
+                v.checked_add(to - m)
+            };
+            assert_eq!(round_up(v, to), want, "{v} to {to}");
+        }
+        assert_eq!(
+            round_up(usize::MAX - (to - 1), to),
+            Some(usize::MAX - (to - 1))
+        );
+        if to > 1 {
+            assert_eq!(round_up(usize::MAX, to), None);
+            assert_eq!(round_up(usize::MAX - (to - 2), to), None);
+        }
+    }
+    assert_eq!(round_up(usize::MAX, 1), Some(usize::MAX));
+}
+
+#[test]
 fn a_default_reservation_is_cheap_and_usable() {
     let mut a = Arena::new().expect("reserve");
     assert_eq!(a.capacity(), DEFAULT_CAP);
