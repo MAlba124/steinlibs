@@ -178,6 +178,10 @@ impl Io {
     /// Epoll driver to ring target fails with `EOPNOTSUPP`. Self-post is allowed.
     /// [`IoError::Kernel`] with `EBADF` for a peer already closed.
     pub fn post(&mut self, to: Peer, value: u64) -> Result<OpId, IoError> {
+        self.call(|io| io.post_in(to, value))
+    }
+
+    fn post_in(&mut self, to: Peer, value: u64) -> Result<OpId, IoError> {
         if !self.peers.contains(&to) {
             return Err(IoError::Kernel(Errno::BADF));
         }

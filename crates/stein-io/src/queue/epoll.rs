@@ -583,7 +583,7 @@ impl Queue {
         let op = self.slots[i as usize].op;
         match op {
             Op::Recv { fd, mem } => once(sys::recv(raw(fd), mem)),
-            Op::Send { fd, mem } => once(sys::send(raw(fd), mem)),
+            Op::Send { fd, mem } => self.send_all(i, raw(fd), mem),
             Op::SendTo { fd, mem, to } => once(sys::send_to(raw(fd), mem, to)),
             Op::RecvFrom { fd, mem } => {
                 // SAFETY: as in `reap_done`, no kernel holds this side.
@@ -698,6 +698,23 @@ impl Queue {
                     return Try::Done(mem.len() as i32, 0);
                 }
                 r => self.slots[i as usize].progress = have + r as u32,
+            }
+        }
+    }
+
+    /// A send keeps its place at the head of the write list until all of it went, so the
+    /// next send on the stream cannot start before the rest. Up to an `i32` count, the
+    /// caller continues past it.
+    fn send_all(&mut self, i: u32, fd: RawFd, mem: Mem) -> Try {
+        let end = mem.part(0, i32::MAX as usize).len();
+        loop {
+            let have = self.slots[i as usize].progress as usize;
+            match sys::send(fd, mem.part(have, end - have)) {
+                r if r == -Errno::AGAIN.raw_os_error() => return Try::Again,
+                r if r < 0 && have == 0 => return Try::Done(r, 0),
+                r if r <= 0 => return Try::Done(have as i32, 0),
+                r if have + r as usize >= end => return Try::Done(end as i32, 0),
+                r => self.slots[i as usize].progress = (have + r as usize) as u32,
             }
         }
     }

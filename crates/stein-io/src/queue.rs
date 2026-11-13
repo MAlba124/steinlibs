@@ -487,6 +487,18 @@ struct RawBuf {
 
 const _: () = assert!(size_of::<RawBuf>() == size_of::<BufRingEntry>());
 
+/// Where the ring's [`Queue::link`] chain stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Chain {
+    /// The last entry carries no `IO_LINK`.
+    Closed,
+    /// The last entry carries `IO_LINK`, the next push joins.
+    Open,
+    /// As `Open`, but the member it waited for never came. A nop ends it before any other
+    /// entry goes in, and a push it cannot precede is refused.
+    Broken,
+}
+
 // One per queue.
 #[allow(clippy::large_enum_variant)]
 enum Engine {
@@ -525,8 +537,9 @@ pub struct Queue {
     taken: bool,
     /// See [`Queue::link`].
     link: bool,
-    /// The last ring entry carries `IO_LINK`, so the next one joins its chain.
-    tail_linked: bool,
+    chain: Chain,
+    /// Pushes that may join a chain, wrapping. Lets the driver see a call that pushed none.
+    pushes: u32,
     /// Slots that may have something waiting behind an open chain, see [`Behind`].
     /// May overcount, a flush counts again.
     behind: u32,
@@ -582,7 +595,8 @@ impl Queue {
             },
             taken: false,
             link: false,
-            tail_linked: false,
+            chain: Chain::Closed,
+            pushes: 0,
             behind: 0,
             ring_pages: 0,
             draining: false,
@@ -677,15 +691,39 @@ impl Queue {
 
     fn push_with(
         &mut self,
+        op: Op,
+        user: u64,
+        control: Option<&[u8]>,
+        apart: bool,
+    ) -> Result<Key, IoError> {
+        // Taken first, so a refused push leaves no link for the next.
+        let link = !apart && core::mem::take(&mut self.link);
+        let pushed = self.push_slot(op, user, control, apart, link);
+        if pushed.is_err() && !apart {
+            // The chain lost its member, so it ends here.
+            self.break_chain();
+        }
+        pushed
+    }
+
+    fn push_slot(
+        &mut self,
         mut op: Op,
         user: u64,
         control: Option<&[u8]>,
         apart: bool,
+        link: bool,
     ) -> Result<Key, IoError> {
         self.check(&op)?;
         let i = self.free;
         if i == NONE {
             return Err(IoError::OpsFull);
+        }
+        // A broken chain ends before anything joins it. An entry apart may wait behind it.
+        if let Err(e) = self.mend()
+            && !apart
+        {
+            return Err(e);
         }
         let side = self.sides.at(i as usize);
         if let (Some(bytes), Op::SendMsg { control: room, .. }) = (control, &mut op) {
@@ -695,11 +733,12 @@ impl Queue {
             // SAFETY: the slot's own room, untouched while the op is in flight.
             *room = unsafe { Mem::raw(c.as_mut_ptr(), bytes.len()) };
         }
+        let linked = self.chain != Chain::Closed;
         // A close in a chain is cancelled with it and never runs, so a nop takes its place
         // and the close runs when the nop lands.
-        let after = self.tail_linked && matches!(op, Op::Close { .. });
+        let after = linked && matches!(op, Op::Close { .. });
         // Apart from an open chain it waits, so what the ring would refuse is refused now.
-        let wait = apart && self.tail_linked;
+        let wait = apart && linked;
         if wait {
             // SAFETY: as above, slot `i` is free.
             uring::encode(op, unsafe { &mut *side })?;
@@ -715,7 +754,6 @@ impl Queue {
         if let Some(n) = group_of(&op).and_then(|g| self.groups.ops.get_mut(g)) {
             *n += 1;
         }
-        let link = !apart && core::mem::take(&mut self.link);
         let mut closed = false;
         let pushed = match &mut self.engine {
             Engine::Uring(_) if wait => {
@@ -727,8 +765,8 @@ impl Queue {
                 // SAFETY: as above, slot `i` was free.
                 let pushed = r.push(sent, unsafe { &mut *side }, key, link);
                 if pushed.is_ok() && !apart {
-                    closed = self.tail_linked && !link;
-                    self.tail_linked = link;
+                    closed = linked && !link;
+                    self.chain = if link { Chain::Open } else { Chain::Closed };
                 }
                 pushed
             }
@@ -741,20 +779,43 @@ impl Queue {
             self.release(i);
             return Err(e);
         }
+        if !apart {
+            self.pushes = self.pushes.wrapping_add(1);
+        }
         if closed {
             self.flush_behind();
         }
         Ok(key)
     }
 
-    /// A submit or tick ends a chain left open with a nop, so what waits behind it goes out.
-    fn close_chain(&mut self) {
-        if let Engine::Uring(r) = &mut self.engine
-            && self.tail_linked
-            && r.end_chain().is_ok()
-        {
-            self.tail_linked = false;
+    /// The member a pending [`Queue::link`] or an open chain waits for never comes, a
+    /// call refused it say. The link drops and the chain ends with a nop. If the ring has
+    /// no room for the nop, it goes in before the next entry, or that entry is refused.
+    pub fn break_chain(&mut self) {
+        self.link = false;
+        if self.chain == Chain::Open {
+            self.chain = Chain::Broken;
         }
+        let _ = self.mend();
+    }
+
+    /// End a broken chain with a nop and push what waited behind it.
+    fn mend(&mut self) -> Result<(), IoError> {
+        if self.chain != Chain::Broken {
+            return Ok(());
+        }
+        if let Engine::Uring(r) = &mut self.engine {
+            r.end_chain()?;
+        }
+        self.chain = Chain::Closed;
+        self.flush_behind();
+        Ok(())
+    }
+
+    /// A submit or tick ends a chain left open with a nop and drops a pending link, so
+    /// what waits behind it goes out.
+    fn close_chain(&mut self) {
+        self.break_chain();
         self.flush_behind();
     }
 
@@ -764,7 +825,7 @@ impl Queue {
         let Engine::Uring(r) = &mut self.engine else {
             return;
         };
-        if self.behind == 0 || self.tail_linked {
+        if self.behind == 0 || self.chain != Chain::Closed {
             return;
         }
         for i in 0..self.slots.len() {
@@ -787,12 +848,17 @@ impl Queue {
         self.behind = 0;
     }
 
+    /// Successful pushes that may join a chain, wrapping.
+    pub(crate) fn pushes(&self) -> u32 {
+        self.pushes
+    }
+
     /// The next push joins a [`Queue::link`] chain, as the last ring entry carries
     /// `IO_LINK`. Such an op may look its descriptors up only when it starts, once the ops
     /// before it ended, so their numbers must stay open until it does. A
     /// [`Queue::push_apart`] never joins.
     pub fn in_chain(&self) -> bool {
-        self.tail_linked
+        self.chain == Chain::Open
     }
 
     /// Entries pushed but not handed to the kernel yet, which name descriptors by number,
@@ -807,9 +873,10 @@ impl Queue {
     /// Link the next push to the one after it. The second fails with `ECANCELED`
     /// if the first fails. Ignored on `epoll`, which runs in push order. A
     /// [`Queue::close`] as the second waits for the first and runs whatever its outcome.
-    /// A chain ends at the first push not linked to the next, or at the next
-    /// [`Queue::submit`] or [`Queue::tick`], which end one left open with a nop. Cancels
-    /// and [`Queue::push_apart`] entries never join it, they wait until it ends.
+    /// A chain ends at the first push not linked to the next, at a refused push, or at the
+    /// next [`Queue::submit`] or [`Queue::tick`], which end one left open with a nop and
+    /// drop a pending link. Cancels and [`Queue::push_apart`] entries never join it, they
+    /// wait until it ends. A linked stream send fails the link when short.
     pub fn link(&mut self) {
         self.link = matches!(self.engine, Engine::Uring(_));
     }
@@ -875,7 +942,7 @@ impl Queue {
                         true
                     }
                     // In the chain it would wait behind it, or fail with it.
-                    _ if self.tail_linked => {
+                    _ if self.chain != Chain::Closed => {
                         s.behind = Behind::Cancel;
                         self.behind += 1;
                         true

@@ -8,6 +8,10 @@ impl Io {
     /// Completes in the same tick as the open. Open failure propagates, cancel gives `ECANCELED`.
     /// One stat per open. Buffers shorter than [`crate::file::META_LEN`] are [`IoError::TooLong`].
     pub fn stat_opened(&mut self, open: OpId) -> Result<OpId, IoError> {
+        self.call(|io| io.stat_opened_in(open))
+    }
+
+    fn stat_opened_in(&mut self, open: OpId) -> Result<OpId, IoError> {
         let waited = self.ops.get(open).copied();
         let opening = |o: &Op| matches!(o.kind, Kind::Open | Kind::Open2) && o.aux == 0;
         let Some(o) = waited.filter(opening) else {
@@ -89,8 +93,22 @@ impl Io {
         if !self.done.is_empty() {
             return true;
         }
-        // Bufferless receives rearm on tick once a buffer frees.
-        let rearms = !self.rearm.is_empty() && (!self.bufs.is_empty() || self.ring_free > 0);
+        // Bufferless receives rearm on tick once a buffer of their kind frees.
+        let rearms = self.rearm.iter().any(|id| self.can_rearm(*id));
         rearms || self.q.pending()
+    }
+
+    /// A receive waiting for a buffer finds one. A multishot one on the provided ring
+    /// needs a ring buffer, any other a free list one.
+    pub(super) fn can_rearm(&self, id: OpId) -> bool {
+        let Some(op) = self.ops.get(id) else {
+            return false;
+        };
+        let multi = op.kind == Kind::RecvMsg || (op.kind == Kind::Recv && op.multishot);
+        if multi && self.group.is_some() {
+            self.ring_free > 0
+        } else {
+            !self.bufs.is_empty()
+        }
     }
 }

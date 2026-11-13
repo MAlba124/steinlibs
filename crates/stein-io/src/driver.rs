@@ -338,6 +338,10 @@ impl Io {
     }
 
     pub fn timeout(&mut self, after: Duration) -> Result<OpId, IoError> {
+        self.call(|io| io.timeout_in(after))
+    }
+
+    fn timeout_in(&mut self, after: Duration) -> Result<OpId, IoError> {
         let id = self.insert(Op::new(Kind::Timeout, -1))?;
         self.submit(id, queue::Op::Timeout { after })?;
         Ok(id)
@@ -421,6 +425,15 @@ impl Io {
     /// `io_uring` descriptor. So would one handed to [`Io::own`], which then leaks, so close
     /// those yourself.
     pub fn close(&mut self, fd: RawFd) -> bool {
+        let mut closed = false;
+        let _ = self.call(|io| {
+            closed = io.close_in(fd);
+            Ok(())
+        });
+        closed
+    }
+
+    fn close_in(&mut self, fd: RawFd) -> bool {
         self.cancel_ops_on(fd);
         // Readiness backend watches by number, which gets reused.
         self.q.forget(fd);
@@ -462,12 +475,7 @@ impl Io {
             return;
         };
         let user = id.to_user_data();
-        let aux = if op.kind == Kind::Splice {
-            op.aux as RawFd
-        } else {
-            -1
-        };
-        for fd in [op.fd, aux] {
+        for fd in fds_of(&op) {
             if fd >= 0 {
                 self.chain_fds.push((user, fd));
             }
@@ -502,7 +510,8 @@ impl Io {
         let mut slot = 0;
         while let Some(id) = self.ops.next_live(slot) {
             slot = id.slot() + 1;
-            if self.ops.get(id).is_some_and(|op| op.fd == fd && !op.done) {
+            let on = |op: &Op| fds_of(op).contains(&fd) && !op.done;
+            if self.ops.get(id).is_some_and(on) {
                 self.cancel(id);
             }
         }
@@ -589,6 +598,17 @@ impl Io {
         }
         self.scratch = got;
         self.harvesting = false;
+    }
+
+    /// Run one caller op. One that fails or pushes no entry, a receive waiting for a buffer
+    /// or a call settled inline say, ends a pending [`Io::chain`], so no later op joins it.
+    fn call<T>(&mut self, f: impl FnOnce(&mut Io) -> Result<T, IoError>) -> Result<T, IoError> {
+        let before = self.q.pushes();
+        let r = f(self);
+        if r.is_err() || self.q.pushes() == before {
+            self.q.break_chain();
+        }
+        r
     }
 
     /// Readiness backend may complete file ops inline, harvested at once.
@@ -866,7 +886,9 @@ impl Io {
     fn insert(&mut self, op: Op) -> Result<OpId, IoError> {
         let id = self.ops.insert(op).ok_or(IoError::OpsFull)?;
         self.set_key(id, NO_KEY);
-        self.count_on(op.fd, true);
+        for fd in fds_of(&op) {
+            self.count_on(fd, true);
+        }
         Ok(id)
     }
 
@@ -895,9 +917,11 @@ impl Io {
         let mut slot = 0;
         while let Some(id) = self.ops.next_live(slot) {
             slot = id.slot() + 1;
-            let fd = self.ops.get(id).map_or(-1, |o| o.fd);
-            if let Some(c) = usize::try_from(fd).ok().filter(|i| (from..n).contains(i)) {
-                self.live_on[c] += 1;
+            let fds = self.ops.get(id).map_or([-1; 2], fds_of);
+            for fd in fds {
+                if let Some(c) = usize::try_from(fd).ok().filter(|i| (from..n).contains(i)) {
+                    self.live_on[c] += 1;
+                }
             }
         }
     }
@@ -924,7 +948,9 @@ impl Io {
         if let Some(h) = self.held.get_mut(id.slot() as usize) {
             *h = None;
         }
-        self.count_on(op.fd, false);
+        for fd in fds_of(&op) {
+            self.count_on(fd, false);
+        }
         Some(op)
     }
 
@@ -996,6 +1022,16 @@ impl Drop for Io {
 }
 
 /// Kinds whose result is a new descriptor.
+/// Descriptors an op names, a splice's source too, -1 for none.
+fn fds_of(op: &Op) -> [RawFd; 2] {
+    let aux = if op.kind == Kind::Splice {
+        op.aux as RawFd
+    } else {
+        -1
+    };
+    [op.fd, aux]
+}
+
 fn gives_fd(kind: Kind) -> bool {
     matches!(kind, Kind::Open | Kind::Open2 | Kind::Accept)
 }

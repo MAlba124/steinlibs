@@ -85,10 +85,12 @@ impl Ring {
         link: bool,
     ) -> Result<(), IoError> {
         let punt = self.punt_reads && matches!(op, Op::Read { at, .. } if at != super::POSITION);
-        let mut e = encode(op, side)?.user_data(key.0);
-        if link {
-            e = e.flags(squeue::Flags::IO_LINK);
+        let mut e = if link {
+            encode_linked(op, side)?.flags(squeue::Flags::IO_LINK)
+        } else {
+            encode(op, side)?
         }
+        .user_data(key.0);
         if punt {
             e = e.flags(squeue::Flags::ASYNC);
         }
@@ -458,6 +460,17 @@ pub(super) fn encode(op: Op, side: &mut Side) -> Result<squeue::Entry, IoError> 
         }
         _ => return encode_file(op, side),
     })
+}
+
+/// [`encode`] of an entry that carries `IO_LINK`. A send waits for all its bytes, so a
+/// short one on a stream fails the link and the next send cannot start before the rest.
+/// A datagram or `SEQPACKET` send is whole or fails, so the flag changes nothing there.
+fn encode_linked(op: Op, side: &mut Side) -> Result<squeue::Entry, IoError> {
+    let Op::Send { fd, mem } = op else {
+        return encode(op, side);
+    };
+    let flags = NOSIGNAL as i32 | libc::MSG_WAITALL;
+    Ok(on!(fd, f => opcode::Send::new(f, mem.ptr, mem.len).flags(flags).build()))
 }
 
 fn encode_file(op: Op, side: &mut Side) -> Result<squeue::Entry, IoError> {

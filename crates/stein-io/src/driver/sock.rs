@@ -8,12 +8,20 @@ use crate::msg;
 impl Io {
     /// The socket is driver-owned and named by [`Op::fd`].
     pub fn connect(&mut self, addr: SocketAddr) -> Result<OpId, IoError> {
+        self.call(|io| io.connect_in(addr))
+    }
+
+    fn connect_in(&mut self, addr: SocketAddr) -> Result<OpId, IoError> {
         let (fd, started) = net::tcp_connect(addr).map_err(IoError::Kernel)?;
         self.start_connect(fd, started)
     }
 
     /// Unix stream connect, as [`Io::connect`].
     pub fn connect_unix(&mut self, to: net::UnixAddr<'_>) -> Result<OpId, IoError> {
+        self.call(|io| io.connect_unix_in(to))
+    }
+
+    fn connect_unix_in(&mut self, to: net::UnixAddr<'_>) -> Result<OpId, IoError> {
         let (fd, started) = net::unix_connect(to).map_err(IoError::Kernel)?;
         self.start_connect(fd, started)
     }
@@ -69,6 +77,10 @@ impl Io {
 
     /// Result is the new driver-owned fd, addr is the peer. `repeating` rearms per connection.
     pub fn accept(&mut self, fd: RawFd, repeating: bool) -> Result<OpId, IoError> {
+        self.call(|io| io.accept_in(fd, repeating))
+    }
+
+    fn accept_in(&mut self, fd: RawFd, repeating: bool) -> Result<OpId, IoError> {
         let mut op = Op::new(Kind::Accept, fd);
         op.multishot = repeating;
         let id = self.insert(op)?;
@@ -108,6 +120,10 @@ impl Io {
 
     /// Driver supplies the buffer. `repeating` stays armed, multishot on the buffer ring.
     pub fn recv(&mut self, fd: RawFd, repeating: bool) -> Result<OpId, IoError> {
+        self.call(|io| io.recv_in(fd, repeating))
+    }
+
+    fn recv_in(&mut self, fd: RawFd, repeating: bool) -> Result<OpId, IoError> {
         let mut op = Op::new(Kind::Recv, fd);
         op.multishot = repeating;
         let id = self.insert(op)?;
@@ -219,6 +235,10 @@ impl Io {
     /// An error frees it, but [`IoError::NotHeld`] when the caller does not hold it.
     /// Short writes are continued. A `len` past the buffer size is [`IoError::TooLong`].
     pub fn send(&mut self, fd: RawFd, buf: BufId, len: u32) -> Result<OpId, IoError> {
+        self.call(|io| io.send_in(fd, buf, len))
+    }
+
+    fn send_in(&mut self, fd: RawFd, buf: BufId, len: u32) -> Result<OpId, IoError> {
         let buf = self.fits(buf, 0, len)?;
         let mut op = Op::new(Kind::Send, fd);
         op.len = len;
@@ -277,6 +297,16 @@ impl Io {
         at: usize,
         len: usize,
     ) -> Result<OpId, IoError> {
+        self.call(|io| io.send_shared_in(fd, data, at, len))
+    }
+
+    fn send_shared_in(
+        &mut self,
+        fd: RawFd,
+        data: Shared,
+        at: usize,
+        len: usize,
+    ) -> Result<OpId, IoError> {
         // Read once, so every resubmit sends from the same memory.
         let bytes = (*data).as_ref();
         let (ptr, whole) = (bytes.as_ptr(), bytes.len());
@@ -328,6 +358,10 @@ impl Io {
 
     /// [`Io::recv`] with the sender address. Repeating stays armed through empty datagrams.
     pub fn recv_from(&mut self, fd: RawFd, repeating: bool) -> Result<OpId, IoError> {
+        self.call(|io| io.recv_from_in(fd, repeating))
+    }
+
+    fn recv_from_in(&mut self, fd: RawFd, repeating: bool) -> Result<OpId, IoError> {
         let mut op = Op::new(Kind::RecvFrom, fd);
         op.multishot = repeating;
         let id = self.insert(op)?;
@@ -368,6 +402,16 @@ impl Io {
 
     /// One datagram. Driver owns `buf` as for [`Io::send`].
     pub fn send_to(
+        &mut self,
+        fd: RawFd,
+        buf: BufId,
+        len: u32,
+        to: SocketAddr,
+    ) -> Result<OpId, IoError> {
+        self.call(|io| io.send_to_in(fd, buf, len, to))
+    }
+
+    fn send_to_in(
         &mut self,
         fd: RawFd,
         buf: BufId,
@@ -415,9 +459,12 @@ impl Io {
 
     /// Link the next submitted op to the one after. Repeat to extend.
     /// On failure (a short splice counts) the rest get `ECANCELED`. A batched
-    /// [`Io::close`] after it runs once the chain ends, failed or not.
+    /// [`Io::close`] after it runs once the chain ends, failed or not. A send linked to the
+    /// next waits for all its bytes, so a short one on a stream fails the chain too.
     /// Does not survive a full SQ flush. Epoll ignores it and runs all in order. Ends at the
-    /// first op not chained on, or when [`Io::flush`] or [`Io::tick`] submits. The driver's
+    /// first op not chained on, or when [`Io::flush`] or [`Io::tick`] submits. Ends too at
+    /// a call that fails or queues no entry, a receive waiting for a buffer, a connect or
+    /// post settled at once, a plain close, so no later op joins it. The driver's
     /// own entries, re-arms, the rest of short writes, cancels and wake polls, never join
     /// it and wait until it ends.
     pub fn chain(&mut self) {
@@ -427,6 +474,17 @@ impl Io {
     /// `setsockopt(2)` from `buf`. Driver owns `buf` as for [`Io::send`]. Completes with
     /// `Ok(0)`.
     pub fn set_sockopt(
+        &mut self,
+        fd: RawFd,
+        level: i32,
+        name: i32,
+        buf: BufId,
+        len: u32,
+    ) -> Result<OpId, IoError> {
+        self.call(|io| io.set_sockopt_in(fd, level, name, buf, len))
+    }
+
+    fn set_sockopt_in(
         &mut self,
         fd: RawFd,
         level: i32,
@@ -451,6 +509,10 @@ impl Io {
     /// Filled length counts the prefix. Failure or cancel releases the buffer, an error
     /// here too, see [`Io::send`]. A range past the buffer size is [`IoError::TooLong`].
     pub fn recv_into(&mut self, fd: RawFd, buf: BufId, at: u32, len: u32) -> Result<OpId, IoError> {
+        self.call(|io| io.recv_into_in(fd, buf, at, len))
+    }
+
+    fn recv_into_in(&mut self, fd: RawFd, buf: BufId, at: u32, len: u32) -> Result<OpId, IoError> {
         let buf = self.fits(buf, at, len)?;
         let mut op = Op::new(Kind::RecvInto, fd);
         op.sent = at;
@@ -498,6 +560,17 @@ impl Io {
     }
 
     fn send_msg_with(
+        &mut self,
+        fd: RawFd,
+        buf: BufId,
+        len: u32,
+        control: msg::Control<'_>,
+        to: Option<SocketAddr>,
+    ) -> Result<OpId, IoError> {
+        self.call(|io| io.send_msg_with_in(fd, buf, len, control, to))
+    }
+
+    fn send_msg_with_in(
         &mut self,
         fd: RawFd,
         buf: BufId,
@@ -555,6 +628,10 @@ impl Io {
     }
 
     fn start_recvmsg(&mut self, fd: RawFd, named: bool) -> Result<OpId, IoError> {
+        self.call(|io| io.start_recvmsg_in(fd, named))
+    }
+
+    fn start_recvmsg_in(&mut self, fd: RawFd, named: bool) -> Result<OpId, IoError> {
         if self.group.is_none() {
             return Err(IoError::NoBufRing);
         }
@@ -645,6 +722,10 @@ impl Io {
 
     /// Poll for readable, or writable with `write`. Completes with `Ok(0)`.
     pub fn ready(&mut self, fd: RawFd, write: bool) -> Result<OpId, IoError> {
+        self.call(|io| io.ready_in(fd, write))
+    }
+
+    fn ready_in(&mut self, fd: RawFd, write: bool) -> Result<OpId, IoError> {
         let mut op = Op::new(Kind::Ready, fd);
         op.aux = u32::from(write);
         let id = self.insert(op)?;
@@ -667,9 +748,19 @@ impl Io {
     }
 
     /// Splice up to `len` bytes, one end must be a pipe. `offset` in `from`, or [`APPEND`].
-    /// Short counts are not continued, zero is EOF. Owned by `to`, closing `to` cancels it.
+    /// Short counts are not continued, zero is EOF. Owned by `to`, closing either end cancels it.
     /// Full socket `to` returns short or `EAGAIN`. On epoll an empty `from` gives `EAGAIN`.
     pub fn splice(
+        &mut self,
+        from: RawFd,
+        offset: u64,
+        to: RawFd,
+        len: u32,
+    ) -> Result<OpId, IoError> {
+        self.call(|io| io.splice_in(from, offset, to, len))
+    }
+
+    fn splice_in(
         &mut self,
         from: RawFd,
         offset: u64,

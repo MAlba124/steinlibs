@@ -49,6 +49,16 @@ impl Io {
         flags: OFlags,
         mode: Mode,
     ) -> Result<OpId, IoError> {
+        self.call(|io| io.open_with_in(dir, path, flags, mode))
+    }
+
+    fn open_with_in(
+        &mut self,
+        dir: RawFd,
+        path: &[u8],
+        flags: OFlags,
+        mode: Mode,
+    ) -> Result<OpId, IoError> {
         let bid = self.path_buf(path, 0)?;
         let (id, bid) = self.insert_path(Kind::Open, bid)?;
         let path = self.buffer(bid, 0, path.len() as u32 + 1);
@@ -76,6 +86,17 @@ impl Io {
         mode: Mode,
         resolve: ResolveFlags,
     ) -> Result<OpId, IoError> {
+        self.call(|io| io.open_beneath_in(dir, path, flags, mode, resolve))
+    }
+
+    fn open_beneath_in(
+        &mut self,
+        dir: RawFd,
+        path: &[u8],
+        flags: OFlags,
+        mode: Mode,
+        resolve: ResolveFlags,
+    ) -> Result<OpId, IoError> {
         let bid = self.path_buf(path, 0)?;
         let (id, bid) = self.insert_path(Kind::Open2, bid)?;
         let path = self.buffer(bid, 0, path.len() as u32 + 1);
@@ -95,6 +116,10 @@ impl Io {
 
     /// Positional read into a driver buffer. `Ok(0)` is EOF.
     pub fn read_at(&mut self, fd: RawFd, offset: u64) -> Result<OpId, IoError> {
+        self.call(|io| io.read_at_in(fd, offset))
+    }
+
+    fn read_at_in(&mut self, fd: RawFd, offset: u64) -> Result<OpId, IoError> {
         let bid = self.bufs.take_lent().map_err(|_| IoError::BuffersFull)?;
         let mut op = Op::new(Kind::Read, fd).with_buf(bid);
         op.offset = offset;
@@ -115,6 +140,17 @@ impl Io {
     /// Filled length counts the prefix. Failure or cancel releases the buffer, an error
     /// here too, see [`Io::send`]. A range past the buffer size is [`IoError::TooLong`].
     pub fn read_at_into(
+        &mut self,
+        fd: RawFd,
+        offset: u64,
+        buf: BufId,
+        at: u32,
+        len: u32,
+    ) -> Result<OpId, IoError> {
+        self.call(|io| io.read_at_into_in(fd, offset, buf, at, len))
+    }
+
+    fn read_at_into_in(
         &mut self,
         fd: RawFd,
         offset: u64,
@@ -143,6 +179,10 @@ impl Io {
 
     /// One-shot read on an unseekable fd (eventfd, pipe). Rearm after each completion.
     pub fn read_stream(&mut self, fd: RawFd) -> Result<OpId, IoError> {
+        self.call(|io| io.read_stream_in(fd))
+    }
+
+    fn read_stream_in(&mut self, fd: RawFd) -> Result<OpId, IoError> {
         let bid = self.bufs.take_lent().map_err(|_| IoError::BuffersFull)?;
         let id = self.insert_lent(Op::new(Kind::Read, fd).with_buf(bid), bid)?;
         let mem = self.buffer(bid, 0, u32::MAX);
@@ -160,6 +200,10 @@ impl Io {
     /// Write at `offset`, or the fd position for [`APPEND`]. Driver owns `buf` as for
     /// [`Io::send`]. Short writes are continued, so completion means all of `len` went out.
     pub fn write(&mut self, fd: RawFd, buf: BufId, len: u32, offset: u64) -> Result<OpId, IoError> {
+        self.call(|io| io.write_in(fd, buf, len, offset))
+    }
+
+    fn write_in(&mut self, fd: RawFd, buf: BufId, len: u32, offset: u64) -> Result<OpId, IoError> {
         let buf = self.fits(buf, 0, len)?;
         let mut op = Op::new(Kind::Write, fd);
         op.len = len;
@@ -179,6 +223,10 @@ impl Io {
 
     /// Completes with a buffer [`crate::file::meta`] decodes. Follows symlinks.
     pub fn stat(&mut self, path: &[u8]) -> Result<OpId, IoError> {
+        self.call(|io| io.stat_in(path))
+    }
+
+    fn stat_in(&mut self, path: &[u8]) -> Result<OpId, IoError> {
         let bid = self.path_buf(path, STATX_ROOM)?;
         let (id, bid) = self.insert_path_on(Kind::Stat, -1, bid)?;
         let out = self.buffer(bid, 0, STATX_ROOM);
@@ -197,6 +245,10 @@ impl Io {
 
     /// [`Io::stat`] of an owned fd.
     pub fn stat_fd(&mut self, fd: RawFd) -> Result<OpId, IoError> {
+        self.call(|io| io.stat_fd_in(fd))
+    }
+
+    fn stat_fd_in(&mut self, fd: RawFd) -> Result<OpId, IoError> {
         let bid = self.bufs.take().map_err(|_| IoError::BuffersFull)?;
         let (id, bid) = self.insert_path_on(Kind::Stat, fd, bid)?;
         let out = self.buffer(bid, 0, STATX_ROOM);
@@ -232,6 +284,10 @@ impl Io {
 
     /// Completes with `Ok(0)`.
     pub fn fallocate(&mut self, fd: RawFd, offset: u64, len: u64) -> Result<OpId, IoError> {
+        self.call(|io| io.fallocate_in(fd, offset, len))
+    }
+
+    fn fallocate_in(&mut self, fd: RawFd, offset: u64, len: u64) -> Result<OpId, IoError> {
         let mut op = Op::new(Kind::Fallocate, fd);
         op.offset = offset;
         let id = self.insert(op)?;
@@ -338,6 +394,17 @@ impl Io {
         at: usize,
         len: u32,
     ) -> Result<OpId, IoError> {
+        self.call(|io| io.read_mem_in(fd, offset, r, at, len))
+    }
+
+    fn read_mem_in(
+        &mut self,
+        fd: RawFd,
+        offset: u64,
+        r: Region,
+        at: usize,
+        len: u32,
+    ) -> Result<OpId, IoError> {
         let mem = self.span_of(r, at, len)?;
         let op = mem_op(Kind::ReadMem, fd, offset, r, at, len);
         let read = queue::Op::Read {
@@ -357,6 +424,17 @@ impl Io {
         at: usize,
         len: u32,
     ) -> Result<OpId, IoError> {
+        self.call(|io| io.write_mem_in(fd, offset, r, at, len))
+    }
+
+    fn write_mem_in(
+        &mut self,
+        fd: RawFd,
+        offset: u64,
+        r: Region,
+        at: usize,
+        len: u32,
+    ) -> Result<OpId, IoError> {
         let mem = self.span_of(r, at, len)?;
         let op = mem_op(Kind::WriteMem, fd, offset, r, at, len);
         let write = queue::Op::Write {
@@ -369,6 +447,10 @@ impl Io {
 
     /// `fsync`, or `fdatasync` with `data`. Completes with `Ok(0)`.
     pub fn sync(&mut self, fd: RawFd, data: bool) -> Result<OpId, IoError> {
+        self.call(|io| io.sync_in(fd, data))
+    }
+
+    fn sync_in(&mut self, fd: RawFd, data: bool) -> Result<OpId, IoError> {
         let id = self.insert(Op::new(Kind::Sync, fd))?;
         self.submit(
             id,
@@ -382,6 +464,10 @@ impl Io {
 
     /// Completes with `Ok(0)`. Ring entry needs kernel 6.9.
     pub fn truncate(&mut self, fd: RawFd, len: u64) -> Result<OpId, IoError> {
+        self.call(|io| io.truncate_in(fd, len))
+    }
+
+    fn truncate_in(&mut self, fd: RawFd, len: u64) -> Result<OpId, IoError> {
         let mut op = Op::new(Kind::Truncate, fd);
         op.offset = len;
         let id = self.insert(op)?;
@@ -391,6 +477,16 @@ impl Io {
 
     /// Both paths must fit one buffer together. Completes with `Ok(0)`.
     pub fn rename(
+        &mut self,
+        from_dir: RawFd,
+        from: &[u8],
+        to_dir: RawFd,
+        to: &[u8],
+    ) -> Result<OpId, IoError> {
+        self.call(|io| io.rename_in(from_dir, from, to_dir, to))
+    }
+
+    fn rename_in(
         &mut self,
         from_dir: RawFd,
         from: &[u8],
@@ -427,6 +523,10 @@ impl Io {
 
     /// `rmdir` with `is_dir`. Completes with `Ok(0)`.
     pub fn unlink(&mut self, dir: RawFd, path: &[u8], is_dir: bool) -> Result<OpId, IoError> {
+        self.call(|io| io.unlink_in(dir, path, is_dir))
+    }
+
+    fn unlink_in(&mut self, dir: RawFd, path: &[u8], is_dir: bool) -> Result<OpId, IoError> {
         let bid = self.path_buf(path, 0)?;
         let (id, bid) = self.insert_path(Kind::Unlink, bid)?;
         let path = self.buffer(bid, 0, path.len() as u32 + 1);
@@ -445,6 +545,10 @@ impl Io {
     /// `EINVAL` if one name does not fit. Blocks, no async getdents exists.
     /// [`IoError::RegionBusy`] if an op in flight names the range.
     pub fn list(&mut self, fd: RawFd, r: Region, at: usize, len: u32) -> Result<OpId, IoError> {
+        self.call(|io| io.list_in(fd, r, at, len))
+    }
+
+    fn list_in(&mut self, fd: RawFd, r: Region, at: usize, len: u32) -> Result<OpId, IoError> {
         self.span_of(r, at, len)?;
         let Some(p) = self.free_range(r, at, len as usize, true) else {
             return Err(IoError::RegionBusy {
