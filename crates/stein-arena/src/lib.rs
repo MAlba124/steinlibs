@@ -23,6 +23,8 @@ pub enum ArenaError {
     Full { asked: usize, left: usize },
     /// Zero, or overflows page rounding.
     BadCap(usize),
+    /// A [`Grow`] of a zero sized type, which has no bytes to reserve.
+    ZeroSized,
 }
 
 impl fmt::Display for ArenaError {
@@ -33,6 +35,7 @@ impl fmt::Display for ArenaError {
                 write!(f, "arena full: {asked} bytes asked, {left} left")
             }
             Self::BadCap(c) => write!(f, "unusable capacity {c}"),
+            Self::ZeroSized => write!(f, "zero sized element type"),
         }
     }
 }

@@ -84,6 +84,32 @@ fn only_the_newest_region_goes_back() {
 }
 
 #[test]
+fn frees_go_back_newest_first_at_their_current_length() {
+    let b = Bump::reserve(1 << 16).unwrap();
+    let a = b.alloc_raw(32, 8).unwrap();
+    let c = b.alloc_raw(16, 8).unwrap();
+    assert!(b.grow_last(c.as_ptr().wrapping_add(16), 16));
+    // SAFETY: each region is the newest when freed and never used again.
+    unsafe {
+        assert!(!b.free_last(c.as_ptr(), 16), "the pre-growth length rewound");
+        assert!(b.free_last(c.as_ptr(), 32));
+        assert!(b.free_last(a.as_ptr(), 32));
+    }
+    assert!(b.is_empty());
+}
+
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "free_last")]
+fn an_oversized_free_over_a_newer_region_is_caught() {
+    let b = Bump::reserve(1 << 16).unwrap();
+    let a = b.alloc_raw(32, 8).unwrap();
+    b.alloc_raw(32, 8).unwrap();
+    // SAFETY: breaks the contract on purpose, the debug check stops the rewind.
+    unsafe { b.free_last(a.as_ptr(), 64) };
+}
+
+#[test]
 fn a_pointer_outside_the_mapping_is_refused() {
     let b = Bump::reserve(1 << 16).unwrap();
     b.alloc_raw(8, 8).unwrap();

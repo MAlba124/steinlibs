@@ -89,7 +89,8 @@ fn arena(ops: &mut Ops<'_>, cap: usize) {
             }
             2 => {
                 let len = ops.u16();
-                let align = ops.u16().max(1);
+                // Powers of two only, as the allocator requires. Spans are offsets.
+                let align = 1usize << (ops.u8() % 17);
                 let at = model.len().next_multiple_of(align);
                 match a.alloc(len, align) {
                     Ok(s) => {
@@ -264,8 +265,10 @@ fn bump(ops: &mut Ops<'_>, cap: usize) {
     let Ok(mut b) = b else {
         return;
     };
+    // Empty, so this is the base address.
+    let base = b.alloc_raw(0, 1).map_or(0, |p| p.as_ptr().addr());
     for _ in 0..4 {
-        round(ops, &b);
+        round(ops, &b, base);
         b.reset();
         assert!(b.is_empty());
         if !ops.more() {
@@ -275,7 +278,9 @@ fn bump(ops: &mut Ops<'_>, cap: usize) {
 }
 
 /// Allocations held together until the round ends, each checked to be intact.
-fn round(ops: &mut Ops<'_>, b: &Bump) {
+/// Alignment is of the address, `base` plus the offset, so a page aligned base still
+/// needs padding for an alignment above the page.
+fn round(ops: &mut Ops<'_>, b: &Bump, base: usize) {
     let mut copies: Vec<(&mut [u8], Vec<u8>)> = Vec::new();
     let mut words: Vec<(&mut [u64], u64)> = Vec::new();
     // Address of the cursor, the end of the latest allocation or growth.
@@ -284,7 +289,7 @@ fn round(ops: &mut Ops<'_>, b: &Bump) {
     while ops.more() && steps < 256 {
         steps += 1;
         let before = b.len();
-        match ops.u8() % 5 {
+        match ops.u8() % 6 {
             0 | 1 => {
                 let src = ops.bytes(255);
                 match b.copy(src) {
@@ -318,7 +323,24 @@ fn round(ops: &mut Ops<'_>, b: &Bump) {
                         cursor = Some(d.as_ptr_range().end.addr());
                         words.push((d, init));
                     }
-                    Err(_) => assert!(before.next_multiple_of(8) + n * 8 > b.capacity()),
+                    Err(_) => {
+                        let at = (base + before).next_multiple_of(8) - base;
+                        assert!(at + n * 8 > b.capacity());
+                    }
+                }
+            }
+            4 => {
+                let n = usize::from(ops.u8());
+                // Up to 64 KiB, past the page size.
+                let align = 1usize << (ops.u8() % 17);
+                let at = (base + before).next_multiple_of(align) - base;
+                match b.alloc_raw(n, align) {
+                    Ok(p) => {
+                        assert_eq!(p.as_ptr().addr(), base + at, "{n} at {align} misplaced");
+                        assert_eq!(b.len(), at + n);
+                        cursor = Some(base + at + n);
+                    }
+                    Err(_) => assert!(at + n > b.capacity(), "{n} at {align} refused with room"),
                 }
             }
             _ => {

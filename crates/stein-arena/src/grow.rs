@@ -19,9 +19,12 @@ unsafe impl<T: Copy + Send> Send for Grow<T> {}
 unsafe impl<T: Copy + Sync> Sync for Grow<T> {}
 
 impl<T: Copy> Grow<T> {
-    /// Room for `cap` elements, reserved and not yet committed.
+    /// Room for `cap` elements, reserved and not yet committed. Zero sized `T` is refused.
     pub fn reserve(cap: usize) -> Result<Grow<T>, ArenaError> {
-        let size = size_of::<T>().max(1);
+        let size = size_of::<T>();
+        if size == 0 {
+            return Err(ArenaError::ZeroSized);
+        }
         let want = cap.checked_mul(size).ok_or(ArenaError::BadCap(cap))?;
         if want == 0 || align_of::<T>() > page() {
             return Err(ArenaError::BadCap(cap));
@@ -51,7 +54,7 @@ impl<T: Copy> Grow<T> {
     }
 
     pub fn push(&mut self, v: T) -> Result<(), ArenaError> {
-        if self.len == self.cap || size_of::<T>() == 0 {
+        if self.len == self.cap {
             return self.full(1);
         }
         // SAFETY: `len < cap`. Base is page aligned and `T` no more than that.
@@ -61,7 +64,7 @@ impl<T: Copy> Grow<T> {
     }
 
     pub fn extend_from_slice(&mut self, vs: &[T]) -> Result<(), ArenaError> {
-        if vs.len() > self.cap - self.len || size_of::<T>() == 0 {
+        if vs.len() > self.cap - self.len {
             return self.full(vs.len());
         }
         // SAFETY: `vs.len()` unborrowed slots past `len`. `vs` cannot overlap

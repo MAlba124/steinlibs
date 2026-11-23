@@ -28,7 +28,13 @@ pub struct Bump {
     len: Cell<usize>,
     /// High-water mark. Bytes past it are still kernel zeroes.
     high: Cell<usize>,
+    /// Offset of the newest non-empty region, [`NO_LAST`] once unknown. Checks `free_last`.
+    #[cfg(debug_assertions)]
+    last: Cell<usize>,
 }
+
+#[cfg(debug_assertions)]
+const NO_LAST: usize = usize::MAX;
 
 // SAFETY: the mapping is exclusively owned.
 unsafe impl Send for Bump {}
@@ -49,6 +55,8 @@ impl Bump {
             cap,
             len: Cell::new(0),
             high: Cell::new(0),
+            #[cfg(debug_assertions)]
+            last: Cell::new(NO_LAST),
         })
     }
 
@@ -67,9 +75,12 @@ impl Bump {
     /// Rewind to empty. Pages stay committed.
     pub fn reset(&mut self) {
         self.len.set(0);
+        #[cfg(debug_assertions)]
+        self.last.set(NO_LAST);
     }
 
-    /// `align` is a power of two, so the round up is a mask, not a divide.
+    /// `align` is a power of two, so the round up is a mask, not a divide. The address is
+    /// aligned, not the offset, as the base is only page aligned.
     fn take(&self, len: usize, align: usize) -> Result<usize, ArenaError> {
         let align = align.max(1);
         debug_assert!(align.is_power_of_two(), "align {align}");
@@ -77,17 +88,20 @@ impl Bump {
             asked: len,
             left: self.cap - self.len.get(),
         };
-        let at = self.len.get();
-        let at = at.checked_add(align - 1).ok_or_else(full)? & !(align - 1);
+        let base = self.base.addr();
+        // Cursor address cannot overflow, it is inside the mapping.
+        let addr = base + self.len.get();
+        let at = (addr.checked_add(align - 1).ok_or_else(full)? & !(align - 1)) - base;
         let end = at.checked_add(len).ok_or_else(full)?;
         if end > self.cap {
-            return Err(ArenaError::Full {
-                asked: len,
-                left: self.cap - self.len.get(),
-            });
+            return Err(full());
         }
         self.len.set(end);
         self.high.set(self.high.get().max(end));
+        #[cfg(debug_assertions)]
+        if len > 0 {
+            self.last.set(at);
+        }
         Ok(at)
     }
 
@@ -130,15 +144,31 @@ impl Bump {
 
     /// Rewind the cursor to `start` if `start + len` is the cursor. False otherwise.
     ///
+    /// The cursor check cannot tell a region from a longer run of regions, so an
+    /// oversized `len` from an older region would rewind over newer ones. Debug builds
+    /// catch that while the newest region is known.
+    ///
     /// # Safety
     ///
-    /// `start` began a region from this arena and is never accessed again.
+    /// `start` began a region from this arena and `len` is that region's exact current
+    /// length, counting every successful [`Bump::grow_last`]. The caller exclusively owns
+    /// all of `start..start + len`, so no other live region lies in it, and never
+    /// accesses it again.
     pub unsafe fn free_last(&self, start: *const u8, len: usize) -> bool {
         let Some(at) = start.addr().checked_sub(self.base.addr()) else {
             return false;
         };
         if at.checked_add(len) != Some(self.len.get()) {
             return false;
+        }
+        // An empty free rewinds nothing and leaves the newest region known.
+        #[cfg(debug_assertions)]
+        if len > 0 {
+            let last = self.last.replace(NO_LAST);
+            debug_assert!(
+                last == NO_LAST || last == at,
+                "free_last at {at} len {len} covers the newer region at {last}"
+            );
         }
         self.len.set(at);
         true
@@ -218,6 +248,41 @@ mod tests {
             let q = b.alloc_raw(1, align).unwrap().as_ptr() as usize;
             assert_eq!(q % align, 0, "align {align}");
             assert!(q >= p + 3 && q - (p + 3) < align, "align {align}");
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    #[repr(C, align(8192))]
+    struct Wide(u8);
+
+    #[test]
+    fn alignment_above_the_page_is_of_the_address() {
+        // A page aligned base is often not 8192 aligned, so try several mappings.
+        let held: Vec<Bump> = (1..=16usize)
+            .map(|i| Bump::reserve((i << 12) + (1 << 18)).unwrap())
+            .collect();
+        for b in &held {
+            b.alloc_raw(1, 1).unwrap();
+            for align in [8192usize, 1 << 14, 1 << 16] {
+                let p = b.alloc_raw(1, align).unwrap().as_ptr().addr();
+                assert_eq!(p % align, 0, "align {align}");
+            }
+            let s = b.alloc_slice(2, Wide(7)).unwrap();
+            assert_eq!(s.as_ptr().addr() % 8192, 0, "a Wide slice unaligned");
+            assert_eq!(s[1].0, 7);
+        }
+    }
+
+    #[test]
+    fn padding_to_an_address_counts_against_the_capacity() {
+        for _ in 0..16 {
+            let b = Bump::reserve(1 << 16).unwrap();
+            let base = b.alloc_raw(0, 1).unwrap().as_ptr().addr();
+            let whole = b.alloc_raw(1 << 16, 1 << 16);
+            assert_eq!(whole.is_ok(), base.is_multiple_of(1 << 16), "base {base:#x}");
+            if let Ok(p) = whole {
+                assert_eq!(p.as_ptr().addr(), base);
+            }
         }
     }
 

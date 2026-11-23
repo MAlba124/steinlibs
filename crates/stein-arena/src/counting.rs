@@ -2,8 +2,10 @@
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::Cell;
+use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::alloc::System;
+use std::io::Write as _;
 
 pub struct Counting;
 
@@ -72,10 +74,24 @@ fn record(layout: Layout) {
     let n = COUNT.fetch_add(1, Ordering::Relaxed);
     BYTES.fetch_add(layout.size(), Ordering::Relaxed);
     if n < TRACE.load(Ordering::Relaxed) {
+        // The capture allocates. REPORTING turns those nested calls away above.
         let _ = REPORTING.try_with(|r| r.set(true));
         let bt = std::backtrace::Backtrace::force_capture();
-        eprintln!("allocation {} of {} bytes:\n{bt}", n + 1, layout.size());
+        let _ = fmt::Write::write_fmt(
+            &mut Stderr(std::io::stderr().lock()),
+            format_args!("allocation {} of {} bytes\n{bt}\n", n + 1, layout.size()),
+        );
         let _ = REPORTING.try_with(|r| r.set(false));
+    }
+}
+
+/// Stderr as `fmt::Write`. A failed write is an error to drop, where `eprintln!`
+/// would panic, and a panic must not unwind out of the allocator.
+struct Stderr<'a>(std::io::StderrLock<'a>);
+
+impl fmt::Write for Stderr<'_> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        self.0.write_all(s.as_bytes()).map_err(|_| fmt::Error)
     }
 }
 

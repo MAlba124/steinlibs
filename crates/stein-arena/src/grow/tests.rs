@@ -3,6 +3,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use super::Grow;
+use crate::ArenaError;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Rec {
@@ -54,6 +55,23 @@ fn the_reservation_is_a_ceiling() {
     assert!(g.push(4).is_ok());
     assert_eq!(g.pop(), Some(4));
     assert_eq!(g.pop(), None);
+}
+
+#[test]
+fn zero_sized_elements_are_refused_at_reservation() {
+    assert!(matches!(Grow::<()>::reserve(8), Err(ArenaError::ZeroSized)));
+    assert!(matches!(Grow::<[u64; 0]>::reserve(1), Err(ArenaError::ZeroSized)));
+}
+
+#[test]
+fn an_empty_extend_is_fine_even_when_full() {
+    let mut g: Grow<u32> = Grow::reserve(1).unwrap();
+    g.extend_from_slice(&[]).unwrap();
+    assert!(g.is_empty());
+    let cap = g.capacity();
+    g.extend_from_slice(&vec![7; cap]).unwrap();
+    g.extend_from_slice(&[]).unwrap();
+    assert_eq!(g.len(), cap);
 }
 
 #[test]
