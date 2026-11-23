@@ -86,8 +86,10 @@ pub(super) struct Slot {
     pub(super) flags: u32,
     /// `epoll` timeout deadline.
     pub(super) at: Option<Instant>,
-    /// Bytes an `epoll` [`Op::RecvAll`] has so far.
+    /// Bytes an `epoll` [`Op::RecvAll`] or whole [`Op::Send`] has moved so far.
     pub(super) progress: u32,
+    /// A send linked to the next, which `epoll` sends whole.
+    pub(super) whole: bool,
     /// A close behind a ring chain, pushed as a nop. Its fd closes when the nop lands.
     pub(super) after_chain: bool,
     /// Waits for an open chain to close, ring only.
@@ -114,6 +116,7 @@ impl Slot {
             flags: 0,
             at: None,
             progress: 0,
+            whole: false,
             after_chain: false,
             behind: Behind::None,
             void: false,
@@ -177,6 +180,8 @@ pub(super) struct Watch {
     pub(super) blocks: Blocks,
     pub(super) read: List,
     pub(super) write: List,
+    /// Polls, each tried on any edge.
+    pub(super) poll: List,
 }
 
 impl Watch {
@@ -185,6 +190,7 @@ impl Watch {
         blocks: Blocks::Unknown,
         read: List::EMPTY,
         write: List::EMPTY,
+        poll: List::EMPTY,
     };
 }
 

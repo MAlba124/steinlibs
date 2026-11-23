@@ -461,12 +461,12 @@ impl Io {
     /// On failure (a short splice counts) the rest get `ECANCELED`. A batched
     /// [`Io::close`] after it runs once the chain ends, failed or not. A send linked to the
     /// next waits for all its bytes, so a short one on a stream fails the chain too.
-    /// Does not survive a full SQ flush. Epoll ignores it and runs all in order. Ends at the
-    /// first op not chained on, or when [`Io::flush`] or [`Io::tick`] submits. Ends too at
-    /// a call that fails or queues no entry, a receive waiting for a buffer, a connect or
-    /// post settled at once, a plain close, so no later op joins it. The driver's
-    /// own entries, re-arms, the rest of short writes, cancels and wake polls, never join
-    /// it and wait until it ends.
+    /// Does not survive a full SQ flush. Epoll runs all in order and fails none, a linked
+    /// send still goes whole. Ends at the first op not chained on, or when [`Io::flush`] or
+    /// [`Io::tick`] submits. Ends too at a call that fails or queues no entry, a receive
+    /// waiting for a buffer, a connect or post settled at once, a plain close, so no later
+    /// op joins it. The driver's own entries, re-arms, the rest of short writes, cancels and
+    /// wake polls, never join it and wait until it ends.
     pub fn chain(&mut self) {
         self.q.link();
     }

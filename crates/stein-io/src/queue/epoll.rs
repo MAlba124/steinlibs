@@ -75,6 +75,17 @@ impl Poll {
     }
 }
 
+/// Which wait list of a descriptor an op joins.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Wait {
+    /// Run in order on a readable edge, until one would block.
+    Read,
+    /// Run in order on a writable edge, until one would block.
+    Write,
+    /// Polls, each run on any edge since each asks its own bits.
+    Poll,
+}
+
 enum Try {
     /// Would block.
     Again,
@@ -130,12 +141,12 @@ impl Queue {
 
     /// Tried now unless an older op waits on the same side, to keep order.
     fn stream(&mut self, i: u32) {
-        let (fd, write) = side_of(&self.slots[i as usize].op);
+        let (fd, on) = side_of(&self.slots[i as usize].op);
         let Some(fd) = self.watched(i, fd) else {
             return;
         };
-        let empty = self.list(fd, write).is_empty();
-        if empty {
+        // A poll keeps no order with other polls, so it is tried at once.
+        if on == Wait::Poll || self.list(fd, on).is_empty() {
             match self.attempt(i) {
                 Try::Again => {}
                 Try::Done(r, f) => return self.finish(i, r, f, true),
@@ -143,7 +154,7 @@ impl Queue {
                 Try::More(r, f) => self.finish(i, r, f | F_MORE, false),
             }
         }
-        self.wait(i, fd, write);
+        self.wait(i, fd, on);
     }
 
     /// Connect now. In progress waits for writable.
@@ -154,7 +165,7 @@ impl Queue {
         match sys::unblocked([raw, -1], || sys::connect(raw, to)) {
             0 => self.finish(i, 0, 0, true),
             r if r == -Errno::INPROGRESS.raw_os_error() || r == -Errno::ALREADY.raw_os_error() => {
-                self.wait(i, raw, true)
+                self.wait(i, raw, Wait::Write)
             }
             r => self.finish(i, r, 0, true),
         }
@@ -183,32 +194,40 @@ impl Queue {
         }
     }
 
-    fn list(&mut self, fd: RawFd, write: bool) -> List {
+    fn list(&mut self, fd: RawFd, on: Wait) -> List {
         let w = &self.watches[fd as usize];
-        if write { w.write } else { w.read }
+        match on {
+            Wait::Read => w.read,
+            Wait::Write => w.write,
+            Wait::Poll => w.poll,
+        }
     }
 
-    fn set_list(&mut self, fd: RawFd, write: bool, l: List) {
+    fn set_list(&mut self, fd: RawFd, on: Wait, l: List) {
         let w = &mut self.watches[fd as usize];
-        if write { w.write = l } else { w.read = l }
+        match on {
+            Wait::Read => w.read = l,
+            Wait::Write => w.write = l,
+            Wait::Poll => w.poll = l,
+        }
     }
 
     /// Append to the descriptor's wait list and register it with epoll.
-    fn wait(&mut self, i: u32, fd: RawFd, write: bool) {
+    fn wait(&mut self, i: u32, fd: RawFd, on: Wait) {
         if let Err(e) = self.add(fd) {
             if self.slots[i as usize].state == State::Flying {
                 self.finish(i, -e.raw_os_error(), 0, true);
             }
             return;
         }
-        let mut l = self.list(fd, write);
+        let mut l = self.list(fd, on);
         match l.tail {
             NONE => l.head = i,
             t => self.slots[t as usize].wait_next = i,
         }
         l.tail = i;
         self.slots[i as usize].wait_next = NONE;
-        self.set_list(fd, write, l);
+        self.set_list(fd, on, l);
     }
 
     fn add(&mut self, fd: RawFd) -> Result<(), Errno> {
@@ -233,25 +252,25 @@ impl Queue {
     }
 
     fn unlink(&mut self, i: u32) {
-        let (fd, write) = side_of(&self.slots[i as usize].op);
+        let (fd, on) = side_of(&self.slots[i as usize].op);
         let Fd::Raw(fd) = fd else { return };
         if fd < 0 || fd as usize >= self.watches.len() {
             return;
         }
         let mut prev = NONE;
-        let mut at = self.list(fd, write).head;
+        let mut at = self.list(fd, on).head;
         while at != NONE && at != i {
             prev = at;
             at = self.slots[at as usize].wait_next;
         }
         if at == i {
-            self.unlink_after(fd, write, prev, i);
+            self.unlink_after(fd, on, prev, i);
         }
     }
 
-    fn unlink_after(&mut self, fd: RawFd, write: bool, prev: u32, i: u32) {
+    fn unlink_after(&mut self, fd: RawFd, on: Wait, prev: u32, i: u32) {
         let next = self.slots[i as usize].wait_next;
-        let mut l = self.list(fd, write);
+        let mut l = self.list(fd, on);
         match prev {
             NONE => l.head = next,
             p => self.slots[p as usize].wait_next = next,
@@ -260,7 +279,7 @@ impl Queue {
             l.tail = prev;
         }
         self.slots[i as usize].wait_next = NONE;
-        self.set_list(fd, write, l);
+        self.set_list(fd, on, l);
     }
 
     /// Drop `epoll` state for `fd` and cancel its waiters. Call after closing an
@@ -272,13 +291,13 @@ impl Queue {
         {
             return;
         }
-        for write in [false, true] {
+        for on in [Wait::Read, Wait::Write, Wait::Poll] {
             loop {
-                let i = self.list(fd, write).head;
+                let i = self.list(fd, on).head;
                 if i == NONE {
                     break;
                 }
-                self.unlink_after(fd, write, NONE, i);
+                self.unlink_after(fd, on, NONE, i);
                 self.end(i, -Errno::CANCELED.raw_os_error());
             }
         }
@@ -496,23 +515,24 @@ impl Queue {
             let fd = tag as RawFd;
             let broken = flags.intersects(epoll::EventFlags::ERR | epoll::EventFlags::HUP);
             if broken || flags.intersects(epoll::EventFlags::IN | epoll::EventFlags::RDHUP) {
-                self.run(fd, false);
+                self.run(fd, Wait::Read);
             }
             if broken || flags.contains(epoll::EventFlags::OUT) {
-                self.run(fd, true);
+                self.run(fd, Wait::Write);
             }
+            self.run(fd, Wait::Poll);
         }
         self.fire_timers(timer);
         Ok(())
     }
 
-    /// Try one side's waiters oldest first until one would block.
-    fn run(&mut self, fd: RawFd, write: bool) {
+    /// Try one side's waiters oldest first until one would block. Every poll is tried.
+    fn run(&mut self, fd: RawFd, on: Wait) {
         if fd < 0 || fd as usize >= self.watches.len() {
             return;
         }
         let mut prev = NONE;
-        let mut i = self.list(fd, write).head;
+        let mut i = self.list(fd, on).head;
         while i != NONE {
             let next = self.slots[i as usize].wait_next;
             if self.slots[i as usize].state == State::Queued {
@@ -521,13 +541,14 @@ impl Queue {
                 continue;
             }
             match self.attempt(i) {
-                Try::Again => break,
+                Try::Again if on != Wait::Poll => break,
+                Try::Again => prev = i,
                 Try::More(r, f) => {
                     self.finish(i, r, f | F_MORE, false);
                     prev = i;
                 }
                 Try::Done(r, f) => {
-                    self.unlink_after(fd, write, prev, i);
+                    self.unlink_after(fd, on, prev, i);
                     self.finish(i, r, f, true);
                 }
             }
@@ -583,7 +604,8 @@ impl Queue {
         let op = self.slots[i as usize].op;
         match op {
             Op::Recv { fd, mem } => once(sys::recv(raw(fd), mem)),
-            Op::Send { fd, mem } => self.send_all(i, raw(fd), mem),
+            Op::Send { fd, mem } if self.slots[i as usize].whole => self.send_all(i, raw(fd), mem),
+            Op::Send { fd, mem } => once(sys::send(raw(fd), mem)),
             Op::SendTo { fd, mem, to } => once(sys::send_to(raw(fd), mem, to)),
             Op::RecvFrom { fd, mem } => {
                 // SAFETY: as in `reap_done`, no kernel holds this side.
@@ -702,9 +724,9 @@ impl Queue {
         }
     }
 
-    /// A send keeps its place at the head of the write list until all of it went, so the
-    /// next send on the stream cannot start before the rest. Up to an `i32` count, the
-    /// caller continues past it.
+    /// A linked send keeps its place at the head of the write list until all of it went, so
+    /// the next send on the stream cannot start before the rest, as `MSG_WAITALL` does on
+    /// the ring. Up to an `i32` count, the caller continues past it.
     fn send_all(&mut self, i: u32, fd: RawFd, mem: Mem) -> Try {
         let end = mem.part(0, i32::MAX as usize).len();
         loop {
@@ -783,24 +805,24 @@ impl Queue {
     }
 }
 
-/// Descriptor an op waits on, and whether on the write side.
-fn side_of(op: &Op) -> (Fd, bool) {
+/// Descriptor an op waits on, and on which of its lists.
+fn side_of(op: &Op) -> (Fd, Wait) {
     match *op {
         Op::Send { fd, .. }
         | Op::SendTo { fd, .. }
         | Op::SendMsg { fd, .. }
         | Op::Write { fd, .. }
         | Op::Connect { fd, .. }
-        | Op::Splice { to: fd, .. } => (fd, true),
-        Op::Poll { fd, events, .. } => (fd, events & libc::POLLIN as u32 == 0),
+        | Op::Splice { to: fd, .. } => (fd, Wait::Write),
+        Op::Poll { fd, .. } => (fd, Wait::Poll),
         Op::Recv { fd, .. }
         | Op::RecvMulti { fd, .. }
         | Op::RecvFrom { fd, .. }
         | Op::RecvAll { fd, .. }
         | Op::RecvMsgMulti { fd, .. }
         | Op::Read { fd, .. }
-        | Op::Accept { fd, .. } => (fd, false),
-        _ => (Fd::Fixed(NONE), false),
+        | Op::Accept { fd, .. } => (fd, Wait::Read),
+        _ => (Fd::Fixed(NONE), Wait::Read),
     }
 }
 

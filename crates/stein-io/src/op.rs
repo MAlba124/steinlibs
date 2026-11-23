@@ -95,7 +95,8 @@ impl Kind {
 #[derive(Clone, Copy, Debug)]
 pub struct Op {
     pub kind: Kind,
-    /// The descriptor, or `-1` for a [`Kind::Timeout`].
+    /// The descriptor, or `-1` for a [`Kind::Timeout`]. A path op names the directory its
+    /// path resolves against while in flight, an open until it lands.
     pub fd: RawFd,
     /// Index of the send buffer, or receive buffer chosen up front, see
     /// [`crate::BufId::index`]. `None` with a provided buffer ring.
@@ -109,8 +110,9 @@ pub struct Op {
     /// [`Kind::SendShared`].
     pub offset: u64,
     /// Per-kind argument. Region for [`Kind::ReadMem`] and [`Kind::WriteMem`],
-    /// source fd for [`Kind::Splice`], bytes so far for [`Kind::RecvInto`] on
-    /// readiness, write side for [`Kind::Ready`], name room for [`Kind::RecvMsg`].
+    /// source fd for [`Kind::Splice`], target directory for [`Kind::Rename`], bytes so
+    /// far for [`Kind::RecvInto`] on readiness, write side for [`Kind::Ready`], name room
+    /// for [`Kind::RecvMsg`].
     pub aux: u32,
     pub multishot: bool,
     /// Cancel requested, not yet confirmed. The slot stays held until the completion arrives.

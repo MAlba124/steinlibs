@@ -60,7 +60,7 @@ impl Io {
         mode: Mode,
     ) -> Result<OpId, IoError> {
         let bid = self.path_buf(path, 0)?;
-        let (id, bid) = self.insert_path(Kind::Open, bid)?;
+        let (id, bid) = self.insert_path(Op::new(Kind::Open, dir), bid)?;
         let path = self.buffer(bid, 0, path.len() as u32 + 1);
         let flags = flags | O_CLOEXEC;
         self.submit(
@@ -98,7 +98,7 @@ impl Io {
         resolve: ResolveFlags,
     ) -> Result<OpId, IoError> {
         let bid = self.path_buf(path, 0)?;
-        let (id, bid) = self.insert_path(Kind::Open2, bid)?;
+        let (id, bid) = self.insert_path(Op::new(Kind::Open2, dir), bid)?;
         let path = self.buffer(bid, 0, path.len() as u32 + 1);
         let flags = flags | O_CLOEXEC;
         self.submit(
@@ -228,7 +228,7 @@ impl Io {
 
     fn stat_in(&mut self, path: &[u8]) -> Result<OpId, IoError> {
         let bid = self.path_buf(path, STATX_ROOM)?;
-        let (id, bid) = self.insert_path_on(Kind::Stat, -1, bid)?;
+        let (id, bid) = self.insert_path(Op::new(Kind::Stat, -1), bid)?;
         let out = self.buffer(bid, 0, STATX_ROOM);
         let path = self.buffer(bid, STATX_ROOM, path.len() as u32 + 1);
         self.submit(
@@ -250,7 +250,7 @@ impl Io {
 
     fn stat_fd_in(&mut self, fd: RawFd) -> Result<OpId, IoError> {
         let bid = self.bufs.take().map_err(|_| IoError::BuffersFull)?;
-        let (id, bid) = self.insert_path_on(Kind::Stat, fd, bid)?;
+        let (id, bid) = self.insert_path(Op::new(Kind::Stat, fd), bid)?;
         let out = self.buffer(bid, 0, STATX_ROOM);
         self.submit(
             id,
@@ -506,7 +506,10 @@ impl Io {
         let bytes = self.bufs.bytes_mut(&bid);
         bytes[second..second + to.len()].copy_from_slice(to);
         bytes[second + to.len()] = 0;
-        let (id, bid) = self.insert_path(Kind::Rename, bid)?;
+        // Both directories, so closing either reaches it.
+        let mut op = Op::new(Kind::Rename, from_dir);
+        op.aux = to_dir as u32;
+        let (id, bid) = self.insert_path(op, bid)?;
         let a = self.buffer(bid, 0, second as u32);
         let b = self.buffer(bid, second as u32, to.len() as u32 + 1);
         self.submit(
@@ -528,7 +531,7 @@ impl Io {
 
     fn unlink_in(&mut self, dir: RawFd, path: &[u8], is_dir: bool) -> Result<OpId, IoError> {
         let bid = self.path_buf(path, 0)?;
-        let (id, bid) = self.insert_path(Kind::Unlink, bid)?;
+        let (id, bid) = self.insert_path(Op::new(Kind::Unlink, dir), bid)?;
         let path = self.buffer(bid, 0, path.len() as u32 + 1);
         self.submit(
             id,
@@ -591,19 +594,11 @@ impl Io {
         })
     }
 
-    fn insert_path(&mut self, kind: Kind, bid: BufId) -> Result<(OpId, u16), IoError> {
-        self.insert_path_on(kind, -1, bid)
-    }
-
-    /// Lends a path buffer the driver filled to the op. Returns the op and the buffer's index.
-    fn insert_path_on(
-        &mut self,
-        kind: Kind,
-        fd: RawFd,
-        bid: BufId,
-    ) -> Result<(OpId, u16), IoError> {
+    /// Lends a path buffer the driver filled to `op`, whose `fd` is the directory its path
+    /// resolves against until an open lands. Returns the op and the buffer's index.
+    fn insert_path(&mut self, op: Op, bid: BufId) -> Result<(OpId, u16), IoError> {
         let i = self.lend(bid)?;
-        let id = self.insert_lent(Op::new(kind, fd).with_buf(i), i)?;
+        let id = self.insert_lent(op.with_buf(i), i)?;
         Ok((id, i))
     }
 
@@ -614,6 +609,10 @@ impl Io {
         }
         if let Some(slot) = self.ops.get_mut(id) {
             slot.buf = None;
+        }
+        if matches!(op.kind, Kind::Rename | Kind::Unlink) {
+            // Named its directory while in flight, its completion names no descriptor.
+            self.set_fd(id, -1);
         }
         self.done_plain(id, res);
     }
@@ -627,6 +626,8 @@ impl Io {
         }
         if res < 0 {
             let e = Errno::from_raw_os_error(-res);
+            // Named its directory while in flight, a failed one reports no descriptor.
+            self.set_fd(id, -1);
             self.retire(id, Err(e), None);
             return self.stat_landed(op, Err(e));
         }

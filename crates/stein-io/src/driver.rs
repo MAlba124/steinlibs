@@ -582,6 +582,11 @@ impl Io {
             return Ok(self.done.len());
         }
         self.retry_rearms();
+        // A re-armed receive may have finished inline or failed, so it waits for nothing.
+        let timeout = match self.done.is_empty() {
+            true => timeout,
+            false => Some(Duration::ZERO),
+        };
         self.q.tick(timeout)?;
         self.harvest();
         Ok(self.done.len())
@@ -894,9 +899,8 @@ impl Io {
 
     /// [`Io::count_on`] for every descriptor `op` names.
     fn count_fds(&mut self, op: &Op, more: bool) {
-        self.count_on(op.fd, more);
-        if op.kind == Kind::Splice {
-            self.count_on(op.aux as RawFd, more);
+        for fd in fds_of(op) {
+            self.count_on(fd, more);
         }
     }
 
@@ -1027,17 +1031,17 @@ impl Drop for Io {
     }
 }
 
-/// Kinds whose result is a new descriptor.
-/// Descriptors an op names, a splice's source too, -1 for none.
+/// Descriptors an op names, a splice's source and a rename's target directory too, -1 for
+/// none. A path op names its directory, an open until it lands.
 fn fds_of(op: &Op) -> [RawFd; 2] {
-    let aux = if op.kind == Kind::Splice {
-        op.aux as RawFd
-    } else {
-        -1
+    let aux = match op.kind {
+        Kind::Splice | Kind::Rename => op.aux as RawFd,
+        _ => -1,
     };
     [op.fd, aux]
 }
 
+/// Kinds whose result is a new descriptor.
 fn gives_fd(kind: Kind) -> bool {
     matches!(kind, Kind::Open | Kind::Open2 | Kind::Accept)
 }

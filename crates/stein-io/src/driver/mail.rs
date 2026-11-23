@@ -4,6 +4,8 @@
 //! A [`Waker`] wakes a driver from any thread, one without a driver of its own too. An
 //! eventfd the driver polls, its wakes merged into one [`Kind::Wake`] until the next look.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use rustix::event::{EventfdFlags, eventfd};
 use rustix::pipe::PipeFlags;
 
@@ -18,11 +20,17 @@ pub struct Mailbox {
 
 /// A [`Mailbox`] adopted by a sending driver. Made only by [`Io::peer`], and a post
 /// goes only to a peer the driver still has, so no copy reaches another descriptor.
+/// Each adoption has its own stamp, so a copy kept past [`Io::close`] matches no peer
+/// that later takes the same number.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Peer {
     fd: RawFd,
     ring: bool,
+    stamp: u64,
 }
+
+/// Peer stamps, unique for the process's life.
+static STAMPS: AtomicU64 = AtomicU64::new(1);
 
 impl Peer {
     /// The descriptor, to close with [`Io::close`].
@@ -166,7 +174,12 @@ impl Io {
     /// Adopt a mailbox. Close with [`Io::close`] on [`Peer::fd`].
     pub fn peer(&mut self, m: Mailbox) -> Peer {
         let fd = self.own(m.fd);
-        let p = Peer { fd, ring: m.ring };
+        let stamp = STAMPS.fetch_add(1, Ordering::Relaxed);
+        let p = Peer {
+            fd,
+            ring: m.ring,
+            stamp,
+        };
         self.peers.push(p);
         p
     }

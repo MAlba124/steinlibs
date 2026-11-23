@@ -234,7 +234,8 @@ pub enum Op {
         fd: Fd,
         group: Group,
     },
-    /// Send what fits. No `SIGPIPE`.
+    /// Send what fits, completing with the count sent. Linked to the next by
+    /// [`Queue::link`], all of it. No `SIGPIPE`.
     Send {
         fd: Fd,
         mem: Mem,
@@ -797,7 +798,7 @@ impl Queue {
         self.free = s.next;
         (s.op, s.user, s.state, s.cancel, s.next, s.wait_next) =
             (op, user, State::Flying, false, NONE, NONE);
-        (s.progress, s.punt) = (0, punt);
+        (s.progress, s.punt, s.whole) = (0, punt, false);
         let key = Key::new(i, s.generation);
         self.live += 1;
         if let Some(n) = group_of(&op).and_then(|g| self.groups.ops.get_mut(g)) {
@@ -839,6 +840,8 @@ impl Queue {
         }
         let key = self.arm(i, op, user, punt);
         let s = &mut self.slots[i as usize];
+        // Read by `epoll` only, the ring sends a linked send whole by its flags.
+        s.whole = link;
         s.after_chain = after;
         s.behind = if wait { Behind::Op } else { Behind::None };
         let mut closed = false;
@@ -967,14 +970,16 @@ impl Queue {
     }
 
     /// Link the next push to the one after it. The second fails with `ECANCELED`
-    /// if the first fails. Ignored on `epoll`, which runs in push order. A
-    /// [`Queue::close`] as the second waits for the first and runs whatever its outcome.
-    /// A chain ends at the first push not linked to the next, at a refused push, or at the
-    /// next [`Queue::submit`] or [`Queue::tick`], which end one left open with a nop and
-    /// drop a pending link. Cancels and [`Queue::push_apart`] entries never join it, they
-    /// wait until it ends. A linked stream send fails the link when short.
+    /// if the first fails. A [`Queue::close`] as the second waits for the first and runs
+    /// whatever its outcome. A chain ends at the first push not linked to the next, at a
+    /// refused push, or at the next [`Queue::submit`] or [`Queue::tick`], which end one
+    /// left open with a nop and drop a pending link. Cancels and [`Queue::push_apart`]
+    /// entries never join it, they wait until it ends. A linked [`Op::Send`] waits for all
+    /// its bytes, so on a stream the next send cannot start before its rest, and a short
+    /// one fails the link. `epoll` runs in push order and chains nothing, there a linked
+    /// send only goes whole.
     pub fn link(&mut self) {
-        self.link = matches!(self.engine, Engine::Uring(_));
+        self.link = true;
     }
 
     /// Completions the kernel dropped. Always zero on `epoll`.
