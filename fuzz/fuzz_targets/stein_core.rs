@@ -43,10 +43,24 @@ fuzz_target!(|data: &[u8]| {
     }
 });
 
+/// Last generation a slot or block is handed out at before it retires.
+const LAST_LIVE: u32 = u32::MAX - 2;
+
+fn generation<T>(h: Handle<T>) -> u32 {
+    h.to_user_data() as u32
+}
+
 fn pool(ops: &mut Ops<'_>) {
     let n = usize::from(ops.u8() % 33);
     let mut slots = vec![None; n];
-    let mut gens = vec![0xdead_beef; n];
+    // Leftover generations, some a few cycles from retiring.
+    let mut gens: Vec<u32> = (0..n)
+        .map(|_| match ops.u8() {
+            b @ 0..=127 => 0xdead_be00 | u32::from(b),
+            b => u32::MAX - u32::from(b & 7),
+        })
+        .collect();
+    let mut retired = gens.iter().filter(|&&g| g >= LAST_LIVE).count();
     let mut free = vec![7; n];
     let p = Pool::<u32>::new(&mut slots, &mut gens, &mut free);
     assert!(p.is_ok(), "equal lengths refused");
@@ -61,16 +75,22 @@ fn pool(ops: &mut Ops<'_>) {
                 let v = ops.u32();
                 match p.insert(v) {
                     Some(h) => {
-                        assert!(live.len() < n, "an insert past capacity");
+                        assert!(live.len() + retired < n, "an insert past capacity");
                         assert!(live.iter().all(|(l, _)| l.slot() != h.slot()));
+                        let g = generation(h);
+                        assert!(g & 1 == 1 && g <= LAST_LIVE, "issued {h:?}");
+                        assert!(dead.iter().all(|d| !p.contains(*d)), "a dead handle revived");
                         live.push((h, v));
                     }
-                    None => assert_eq!(live.len(), n, "an insert refused with room"),
+                    None => assert_eq!(live.len() + retired, n, "an insert refused with room"),
                 }
             }
             2 if !live.is_empty() => {
                 let (h, v) = live.swap_remove(usize::from(ops.u8()) % live.len());
                 assert_eq!(p.remove(h), Some(v));
+                if generation(h) == LAST_LIVE {
+                    retired += 1;
+                }
                 dead.push(h);
             }
             3 if !dead.is_empty() => {
@@ -99,6 +119,7 @@ fn pool(ops: &mut Ops<'_>) {
         }
         assert_eq!(p.len(), live.len());
         assert_eq!(p.capacity(), n);
+        assert_eq!(p.retired(), retired);
         for (h, v) in &live {
             assert_eq!(p.get(*h), Some(v));
         }
@@ -114,6 +135,20 @@ fn pool(ops: &mut Ops<'_>) {
         walked.push(h);
     }
     assert_eq!(walked, want.iter().map(|(h, _)| *h).collect::<Vec<_>>());
+
+    // A rebuild on the same columns keeps every old handle dead, refilled or not.
+    let p = Pool::<u32>::new(&mut slots, &mut gens, &mut free);
+    let Ok(mut p) = p else {
+        return;
+    };
+    let old: Vec<Handle<u32>> = live.iter().map(|(h, _)| *h).chain(dead).collect();
+    retired += live.iter().filter(|(h, _)| generation(*h) == LAST_LIVE).count();
+    assert_eq!(p.retired(), retired);
+    while p.insert(0).is_some() {}
+    assert_eq!(p.len() + retired, n);
+    for h in old {
+        assert!(!p.contains(h), "{h:?} outlived its pool");
+    }
 }
 
 fn keyed(ops: &mut Ops<'_>) {
@@ -212,8 +247,9 @@ fn blocks(ops: &mut Ops<'_>) {
     };
     assert_eq!(p.block_size(), size);
     let mut held: Vec<(BlockId, VecDeque<u8>)> = Vec::new();
+    let mut dead: Vec<BlockId> = Vec::new();
     while ops.more() {
-        match ops.u8() % 5 {
+        match ops.u8() % 6 {
             0 => match p.acquire() {
                 Ok(id) => {
                     assert!(held.iter().all(|(h, _)| *h != id));
@@ -224,7 +260,12 @@ fn blocks(ops: &mut Ops<'_>) {
             },
             1 if !held.is_empty() => {
                 let (id, _) = held.swap_remove(usize::from(ops.u8()) % held.len());
-                p.release(id);
+                assert_eq!(p.release(id), Ok(()));
+                dead.push(id);
+            }
+            5 if !dead.is_empty() => {
+                let id = dead[usize::from(ops.u8()) % dead.len()];
+                assert_eq!(p.release(id), Err(BufError::NotHeld(id)), "a stale release taken");
             }
             2 | 3 if !held.is_empty() => {
                 let i = usize::from(ops.u8()) % held.len();
@@ -240,7 +281,7 @@ fn blocks(ops: &mut Ops<'_>) {
                     Err(e) => assert!(e == BufError::BlockFull && !fits),
                 }
             }
-            _ if !held.is_empty() => {
+            4 if !held.is_empty() => {
                 let i = usize::from(ops.u8()) % held.len();
                 let (id, model) = &mut held[i];
                 let n = usize::from(ops.u8()) % (model.len() + 1);
@@ -259,5 +300,15 @@ fn blocks(ops: &mut Ops<'_>) {
             assert_eq!(p.len(*id), model.len());
             assert_eq!(p.writable(*id), size - model.len());
         }
+    }
+
+    // A rebuild on the same meta refuses every id from before.
+    let p = BlockPool::new(&mut storage, &mut meta, &mut free);
+    let Ok(mut p) = p else {
+        return;
+    };
+    assert_eq!(p.free_blocks(), count);
+    for id in held.iter().map(|(id, _)| *id).chain(dead) {
+        assert_eq!(p.release(id), Err(BufError::NotHeld(id)));
     }
 }

@@ -178,19 +178,21 @@ impl<'a, T> KeyedStore<'a, T> {
 
     pub fn remove(&mut self, key: u64) -> Option<T> {
         match self.probe(key) {
-            Probe::Hit(i) => self.remove_at(i),
+            Probe::Hit(i) => self.remove_at(i).0,
             _ => None,
         }
     }
 
     /// Clear slot `i` and backward-shift its chain over the hole. No tombstones.
-    fn remove_at(&mut self, i: usize) -> Option<T> {
+    /// Returns the value and the slots scanned after `i`, the empty one included.
+    fn remove_at(&mut self, i: usize) -> (Option<T>, usize) {
         let mask = self.keys.len() - 1;
         let taken = self.values[i].take();
         self.live -= 1;
 
         let mut hole = i;
         let mut j = (i + 1) & mask;
+        let mut scanned = 1;
         while self.values[j].is_some() {
             let home = (mix(self.keys[j]) as usize) & mask;
             // Shift j only if the hole is on j's chain from home, else j is unreachable.
@@ -201,11 +203,12 @@ impl<'a, T> KeyedStore<'a, T> {
                 hole = j;
             }
             j = (j + 1) & mask;
+            scanned += 1;
         }
         // Cosmetic, keeps stale keys out of a debugger view.
         self.keys[hole] = 0;
         self.last_touched[hole] = 0;
-        taken
+        (taken, scanned)
     }
 
     /// Evict entries older than `max_age` frames, return the count. Inclusive, and
@@ -227,8 +230,13 @@ impl<'a, T> KeyedStore<'a, T> {
         evicted
     }
 
-    /// Incremental [`KeyedStore::prune`] over at most `budget` slots from `cursor`.
+    /// Incremental [`KeyedStore::prune`] spending `budget` slot visits from `cursor`.
     /// Returns evicted count and resume cursor. Entries may outlive `max_age` by one sweep.
+    ///
+    /// An eviction costs its slot plus the cluster its backward shift scans. It always
+    /// finishes so the table stays valid between calls, so a call can overrun `budget` by
+    /// less than one cluster, at most [`KeyedStore::load_limit`] slots. Carrying a shift
+    /// across calls would need tombstones on the lookup path.
     pub fn prune_from(
         &mut self,
         frame: u32,
@@ -242,15 +250,18 @@ impl<'a, T> KeyedStore<'a, T> {
         }
         let mut i = cursor % cap;
         let mut evicted = 0;
-        for _ in 0..budget {
+        let mut left = budget;
+        while left > 0 {
             let stale =
                 self.values[i].is_some() && frame.saturating_sub(self.last_touched[i]) > max_age;
             if stale {
-                self.remove_at(i);
+                let (_, scanned) = self.remove_at(i);
                 evicted += 1;
+                left = left.saturating_sub(1 + scanned);
                 // Do not advance, as in `prune`.
                 continue;
             }
+            left -= 1;
             i = (i + 1) % cap;
         }
         (evicted, i)
@@ -508,6 +519,30 @@ mod tests {
         assert_eq!(s.prune(50, 1), 3, "every link is stale");
         assert!(s.is_empty());
         assert!(s.iter().next().is_none());
+    }
+
+    #[test]
+    fn prune_from_charges_the_cluster_an_eviction_shifts() {
+        let (mut k, mut v, mut t) = store!(u32, 16);
+        let mut s = KeyedStore::new(&mut k, &mut v, &mut t).expect("power of two");
+        let mut c = [0u64; 6];
+        keys_at(4, 16, &mut c);
+        // Two stale links at the head of a six long cluster.
+        for (n, &key) in c.iter().enumerate() {
+            let frame = if n < 2 { 0 } else { 20 };
+            s.get_or_insert_with(key, frame, || n as u32).expect("room");
+        }
+        // The first eviction scans six slots, more than a budget of two.
+        assert_eq!(s.prune_from(20, 2, 4, 2), (1, 4));
+        assert_eq!(s.get(c[0]), None);
+        assert_eq!(s.get(c[1]), Some(&1), "still owed, not lost");
+        for (n, &key) in c.iter().enumerate().skip(2) {
+            assert_eq!(s.get(key), Some(&(n as u32)), "fresh link lost");
+        }
+        // A budget of one still makes progress.
+        assert_eq!(s.prune_from(20, 2, 4, 1), (1, 4));
+        assert_eq!(s.get(c[1]), None);
+        assert_eq!(s.len(), 4);
     }
 
     #[test]

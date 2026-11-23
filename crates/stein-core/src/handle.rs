@@ -1,6 +1,18 @@
 //! Generational handles and the pool they index into.
+//!
+//! A slot's generation is even while free and odd while live. It only rises, and a
+//! slot whose last live generation is removed retires for good, so no handle is reissued.
 
 use core::marker::PhantomData;
+
+/// Terminal generation. Reached by removing the last live one, `u32::MAX - 2`.
+pub(crate) const RETIRED: u32 = u32::MAX - 1;
+
+/// Even resting generation for a slot found in reused storage. Live rounds up to free.
+pub(crate) const fn settle(generation: u32) -> u32 {
+    let g = generation.saturating_add(generation & 1);
+    if g > RETIRED { RETIRED } else { g }
+}
 
 /// Index plus generation, type-tagged by `T`.
 pub struct Handle<T> {
@@ -81,6 +93,10 @@ pub struct Pool<'a, T> {
 
 impl<'a, T> Pool<'a, T> {
     /// Take the storage and reset it to empty, discarding prior contents.
+    ///
+    /// Generations carry over, so handles from an earlier pool on the same columns
+    /// stay dead. Zeroed columns start fresh and cannot know handles minted on other
+    /// storage, drop those before reusing their ids here. Retired slots stay retired.
     pub fn new(
         slots: &'a mut [Option<T>],
         generations: &'a mut [u32],
@@ -96,22 +112,24 @@ impl<'a, T> Pool<'a, T> {
         if slots.len() > u32::MAX as usize {
             return Err(PoolError::TooManySlots(slots.len()));
         }
-        let n = slots.len() as u32;
         for s in slots.iter_mut() {
             *s = None;
         }
-        for g in generations.iter_mut() {
-            *g = 0;
-        }
-        // Descending so inserts fill slot 0 first. Replay depends on this order.
-        for (i, f) in free.iter_mut().enumerate() {
-            *f = n - 1 - i as u32;
+        // Pushed descending so inserts fill slot 0 first. Replay depends on this order.
+        let mut free_len = 0;
+        for i in (0..generations.len()).rev() {
+            let g = settle(generations[i]);
+            generations[i] = g;
+            if g != RETIRED {
+                free[free_len] = i as u32;
+                free_len += 1;
+            }
         }
         Ok(Pool {
             slots,
             generations,
             free,
-            free_len: n,
+            free_len: free_len as u32,
             live: 0,
         })
     }
@@ -122,11 +140,17 @@ impl<'a, T> Pool<'a, T> {
     pub fn is_empty(&self) -> bool {
         self.live == 0
     }
+    /// Slots in the storage, retired ones included.
     pub fn capacity(&self) -> usize {
         self.slots.len()
     }
 
-    /// `None` when full.
+    /// Slots whose generations ran out. They never hold a value again.
+    pub fn retired(&self) -> usize {
+        self.slots.len() - self.live as usize - self.free_len as usize
+    }
+
+    /// `None` when full, that is when `len() + retired() == capacity()`.
     pub fn insert(&mut self, value: T) -> Option<Handle<T>> {
         if self.free_len == 0 {
             return None;
@@ -171,8 +195,10 @@ impl<'a, T> Pool<'a, T> {
         }
         let i = h.index as usize;
         self.generations[i] += 1; // even => free
-        self.free[self.free_len as usize] = h.index;
-        self.free_len += 1;
+        if self.generations[i] != RETIRED {
+            self.free[self.free_len as usize] = h.index;
+            self.free_len += 1;
+        }
         self.live -= 1;
         self.slots[i].take()
     }
@@ -372,6 +398,68 @@ mod tests {
         let p = Pool::new(&mut s, &mut g, &mut f).expect("lengths agree");
         assert!(p.is_empty(), "a fresh pool must not inherit old entries");
         assert!(p.next_live(0).is_none());
+    }
+
+    #[test]
+    fn rebuilt_pool_rejects_handles_from_its_last_life() {
+        let (mut s, mut g, mut f) = pool!(u32, 2);
+        let bits = {
+            let mut p = Pool::new(&mut s, &mut g, &mut f).expect("lengths agree");
+            p.insert(1).expect("cap").to_user_data()
+        };
+        let mut p = Pool::new(&mut s, &mut g, &mut f).expect("lengths agree");
+        let fresh = p.insert(2).expect("cap");
+        let stale: Handle<u32> = Handle::from_user_data(bits);
+        assert_eq!(stale.slot(), fresh.slot(), "setup: the slot is reused");
+        assert!(!p.contains(stale), "a late completion named the replacement");
+        assert_eq!(p.get(stale), None);
+        assert_eq!(p.remove(stale), None);
+        assert_eq!(p.get(fresh), Some(&2));
+    }
+
+    #[test]
+    fn exhausted_generation_never_revalidates_an_old_handle() {
+        let (mut s, mut g, mut f) = pool!(u32, 2);
+        let mut p = Pool::new(&mut s, &mut g, &mut f).expect("lengths agree");
+        let first = p.insert(0).expect("cap");
+        p.remove(first);
+        // Free, one live generation left.
+        p.generations[0] = u32::MAX - 3;
+        let last = p.insert(1).expect("cap");
+        assert_eq!((last.slot(), last.generation), (0, u32::MAX - 2));
+        assert_eq!(p.remove(last), Some(1));
+        assert_eq!(p.retired(), 1, "slot 0 must retire");
+        assert!(!p.contains(last));
+        for v in 2..6 {
+            let h = p.insert(v).expect("slot 1 is free");
+            assert_eq!(h.slot(), 1, "a retired slot was reissued");
+            assert!(!p.contains(first), "cycle {v} revalidated the first handle");
+            p.remove(h);
+        }
+        // Full counts the retired slot.
+        let held = p.insert(7).expect("slot 1 is free");
+        assert_eq!(p.insert(8), None);
+        assert_eq!((p.len(), p.retired(), p.capacity()), (1, 1, 2));
+        assert_eq!(p.remove(held), Some(7));
+        // Retirement survives a rebuild on the same columns.
+        let mut p = Pool::new(&mut s, &mut g, &mut f).expect("lengths agree");
+        assert_eq!(p.retired(), 1);
+        assert_eq!(p.insert(9).map(|h| h.slot()), Some(1));
+        assert_eq!(p.insert(10), None);
+    }
+
+    #[test]
+    fn rebuild_settles_any_stored_generation() {
+        let (mut s, _, mut f) = pool!(u32, 5);
+        let mut g = [0, 7, u32::MAX - 2, u32::MAX - 1, u32::MAX];
+        let mut p = Pool::new(&mut s, &mut g, &mut f).expect("lengths agree");
+        // Live rounds up to free, the top two and a spent live one retire.
+        assert_eq!(p.retired(), 3);
+        let a = p.insert(1).expect("cap");
+        let b = p.insert(2).expect("cap");
+        assert_eq!((a.slot(), a.generation), (0, 1));
+        assert_eq!((b.slot(), b.generation), (1, 9));
+        assert_eq!(p.insert(3), None);
     }
 
     #[test]

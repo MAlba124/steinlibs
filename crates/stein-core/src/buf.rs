@@ -1,20 +1,30 @@
 //! Fixed-size block pool over caller-supplied storage.
+//!
+//! Block generations follow [`crate::handle`], even free, odd held, retired at the top,
+//! so a copied id refuses to release a block it no longer holds.
 
-/// Block index. Not generational, a block has exactly one owner.
+use crate::handle::{RETIRED, settle};
+
+/// Block index plus the generation it was acquired at. Plain data, fine to store in tables.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct BlockId(u32);
+pub struct BlockId {
+    index: u32,
+    generation: u32,
+}
 
 impl BlockId {
     pub fn index(&self) -> u32 {
-        self.0
+        self.index
     }
 }
 
-/// Per-block cursors. Live bytes are `[consumed, filled)`, `consumed <= filled <= block_size`.
+/// Per-block cursors and generation. Live bytes are `[consumed, filled)`,
+/// `consumed <= filled <= block_size`.
 #[derive(Clone, Copy, Debug)]
 pub struct BlockMeta {
     filled: u32,
     consumed: u32,
+    generation: u32,
 }
 
 impl BlockMeta {
@@ -22,6 +32,7 @@ impl BlockMeta {
     pub const EMPTY: BlockMeta = BlockMeta {
         filled: 0,
         consumed: 0,
+        generation: 0,
     };
 }
 
@@ -37,6 +48,22 @@ pub enum BufError {
     LengthMismatch { meta: usize, free: usize },
     /// More blocks than a `u32` index addresses.
     TooManyBlocks(usize),
+    /// Block size past the `u32` cursors. The pool as a whole may be larger.
+    BlockTooLarge(usize),
+    /// Release of a block this id does not hold, already released or reacquired. Refused.
+    NotHeld(BlockId),
+}
+
+/// Size of each of `blocks` equal blocks carved from `bytes`.
+fn block_size(bytes: usize, blocks: usize) -> Result<usize, BufError> {
+    if blocks == 0 || !bytes.is_multiple_of(blocks) || bytes / blocks == 0 {
+        return Err(BufError::BadStorage { bytes, blocks });
+    }
+    let size = bytes / blocks;
+    if size > u32::MAX as usize {
+        return Err(BufError::BlockTooLarge(size));
+    }
+    Ok(size)
 }
 
 pub struct BlockPool<'a> {
@@ -45,11 +72,16 @@ pub struct BlockPool<'a> {
     /// Stack of free block indices. Live entries are `free[..free_len]`.
     free: &'a mut [u32],
     free_len: u32,
+    retired: u32,
     block_size: usize,
 }
 
 impl<'a> BlockPool<'a> {
-    /// Carve `storage` into `meta.len()` equal blocks. Length must be a multiple of the count.
+    /// Carve `storage` into `meta.len()` equal blocks. Length must be a multiple of the
+    /// count and each block at most `u32::MAX` bytes.
+    ///
+    /// Generations in `meta` carry over, so ids from an earlier pool on the same `meta`
+    /// cannot release here. Retired blocks stay retired.
     pub fn new(
         storage: &'a mut [u8],
         meta: &'a mut [BlockMeta],
@@ -64,27 +96,29 @@ impl<'a> BlockPool<'a> {
         if meta.len() > u32::MAX as usize {
             return Err(BufError::TooManyBlocks(meta.len()));
         }
-        let blocks = meta.len();
-        if blocks == 0 || !storage.len().is_multiple_of(blocks) || storage.len() / blocks == 0 {
-            return Err(BufError::BadStorage {
-                bytes: storage.len(),
-                blocks,
-            });
+        let block_size = block_size(storage.len(), meta.len())?;
+        // Reset cursors so reused storage cannot leak them. Pushed descending so block 0
+        // is acquired first.
+        let mut free_len = 0;
+        for i in (0..meta.len()).rev() {
+            let generation = settle(meta[i].generation);
+            meta[i] = BlockMeta {
+                filled: 0,
+                consumed: 0,
+                generation,
+            };
+            if generation != RETIRED {
+                free[free_len] = i as u32;
+                free_len += 1;
+            }
         }
-        let block_size = storage.len() / blocks;
-        let n = blocks as u32;
-        // Reset so reused storage cannot leak stale cursors.
-        for m in meta.iter_mut() {
-            *m = BlockMeta::EMPTY;
-        }
-        for (i, f) in free.iter_mut().enumerate() {
-            *f = n - 1 - i as u32;
-        }
+        let retired = (meta.len() - free_len) as u32;
         Ok(BlockPool {
             storage,
             meta,
             free,
-            free_len: n,
+            free_len: free_len as u32,
+            retired,
             block_size,
         })
     }
@@ -95,8 +129,13 @@ impl<'a> BlockPool<'a> {
     pub fn free_blocks(&self) -> usize {
         self.free_len as usize
     }
+    /// Blocks in the storage, retired ones included.
     pub fn total_blocks(&self) -> usize {
         self.meta.len()
+    }
+    /// Blocks whose generations ran out. They are never acquired again.
+    pub fn retired_blocks(&self) -> usize {
+        self.retired as usize
     }
 
     /// Total bytes held, the memory ceiling.
@@ -109,35 +148,66 @@ impl<'a> BlockPool<'a> {
             return Err(BufError::Exhausted);
         }
         self.free_len -= 1;
-        let id = self.free[self.free_len as usize];
-        self.meta[id as usize] = BlockMeta::EMPTY;
-        Ok(BlockId(id))
+        let index = self.free[self.free_len as usize];
+        let m = &mut self.meta[index as usize];
+        // Free is even and below RETIRED, so odd and no overflow.
+        let generation = m.generation + 1;
+        *m = BlockMeta {
+            filled: 0,
+            consumed: 0,
+            generation,
+        };
+        Ok(BlockId { index, generation })
     }
 
-    pub fn release(&mut self, id: BlockId) {
+    /// Return a held block. Refuses an id that does not hold it, so a double release or a
+    /// stale copy cannot hand one block to two owners.
+    pub fn release(&mut self, id: BlockId) -> Result<(), BufError> {
+        let Some(m) = self.meta.get_mut(id.index as usize) else {
+            return Err(BufError::NotHeld(id));
+        };
+        if m.generation != id.generation {
+            return Err(BufError::NotHeld(id));
+        }
+        // Held is odd and at most RETIRED - 1, so no overflow.
+        let generation = id.generation + 1;
+        *m = BlockMeta {
+            filled: 0,
+            consumed: 0,
+            generation,
+        };
+        if generation == RETIRED {
+            self.retired += 1;
+        } else {
+            self.free[self.free_len as usize] = id.index;
+            self.free_len += 1;
+        }
+        Ok(())
+    }
+
+    /// Meta index for a held `id`.
+    fn at(&self, id: BlockId) -> usize {
+        let i = id.index as usize;
         debug_assert!(
-            !self.free[..self.free_len as usize].contains(&id.0),
-            "double release of block {}",
-            id.0
+            self.meta[i].generation == id.generation,
+            "block {i} used by a stale id"
         );
-        self.meta[id.0 as usize] = BlockMeta::EMPTY;
-        self.free[self.free_len as usize] = id.0;
-        self.free_len += 1;
+        i
     }
 
     fn start(&self, id: BlockId) -> usize {
-        id.0 as usize * self.block_size
+        id.index as usize * self.block_size
     }
 
     /// Written and not yet consumed bytes.
     pub fn data(&self, id: BlockId) -> &[u8] {
         let start = self.start(id);
-        let m = self.meta[id.0 as usize];
+        let m = self.meta[self.at(id)];
         &self.storage[start + m.consumed as usize..start + m.filled as usize]
     }
 
     pub fn len(&self, id: BlockId) -> usize {
-        let m = self.meta[id.0 as usize];
+        let m = self.meta[self.at(id)];
         (m.filled - m.consumed) as usize
     }
 
@@ -147,7 +217,7 @@ impl<'a> BlockPool<'a> {
 
     /// Space for `append`, counting compaction.
     pub fn writable(&self, id: BlockId) -> usize {
-        let m = self.meta[id.0 as usize];
+        let m = self.meta[self.at(id)];
         self.block_size - (m.filled - m.consumed) as usize
     }
 
@@ -156,46 +226,44 @@ impl<'a> BlockPool<'a> {
         if bytes.len() > self.writable(id) {
             return Err(BufError::BlockFull);
         }
-        let m = self.meta[id.0 as usize];
-        if (self.block_size - m.filled as usize) < bytes.len() {
-            self.compact(id);
+        let i = self.at(id);
+        if (self.block_size - self.meta[i].filled as usize) < bytes.len() {
+            self.compact(i);
         }
-        let start = self.start(id);
-        let m = self.meta[id.0 as usize];
-        let at = start + m.filled as usize;
+        let at = self.start(id) + self.meta[i].filled as usize;
         self.storage[at..at + bytes.len()].copy_from_slice(bytes);
-        self.meta[id.0 as usize].filled += bytes.len() as u32;
+        // Fits in u32, the block size does.
+        self.meta[i].filled += bytes.len() as u32;
         Ok(())
     }
 
     /// Mark `n` bytes at the front as consumed.
     pub fn consume(&mut self, id: BlockId, n: usize) {
-        let m = &mut self.meta[id.0 as usize];
+        let i = self.at(id);
+        let m = &mut self.meta[i];
         let avail = (m.filled - m.consumed) as usize;
         debug_assert!(n <= avail, "consumed {n} of {avail} available");
         let n = n.min(avail) as u32;
         m.consumed += n;
         if m.consumed == m.filled {
-            *m = BlockMeta::EMPTY;
+            m.filled = 0;
+            m.consumed = 0;
         }
     }
 
-    /// Move live bytes to the front.
-    fn compact(&mut self, id: BlockId) {
-        let m = self.meta[id.0 as usize];
+    /// Move block `i`'s live bytes to its front.
+    fn compact(&mut self, i: usize) {
+        let m = self.meta[i];
         if m.consumed == 0 {
             return;
         }
-        let start = self.start(id);
-        let live = (m.filled - m.consumed) as usize;
+        let start = i * self.block_size;
         self.storage.copy_within(
             start + m.consumed as usize..start + m.filled as usize,
             start,
         );
-        self.meta[id.0 as usize] = BlockMeta {
-            filled: live as u32,
-            consumed: 0,
-        };
+        self.meta[i].filled = m.filled - m.consumed;
+        self.meta[i].consumed = 0;
     }
 }
 
@@ -221,7 +289,7 @@ mod tests {
         assert_eq!(p.free_blocks(), 2);
         let a = p.acquire().expect("free");
         assert_eq!(p.free_blocks(), 1);
-        p.release(a);
+        assert_eq!(p.release(a), Ok(()));
         assert_eq!(p.free_blocks(), 2);
     }
 
@@ -293,7 +361,7 @@ mod tests {
         let mut p = BlockPool::new(&mut s, &mut m, &mut f).expect("valid storage");
         let b = p.acquire().expect("free");
         p.append(b, b"dirty").expect("fits");
-        p.release(b);
+        assert_eq!(p.release(b), Ok(()));
         let c = p.acquire().expect("free");
         assert!(p.is_empty(c), "reused block must not carry old data");
     }
@@ -364,6 +432,92 @@ mod tests {
             BlockPool::new(&mut s, &mut m, &mut f).err(),
             Some(BufError::LengthMismatch { meta: 2, free: 3 })
         );
+    }
+
+    #[test]
+    fn double_release_cannot_hand_out_one_block_twice() {
+        let (mut s, mut m, mut f) = blocks!(8, 3);
+        let mut p = BlockPool::new(&mut s, &mut m, &mut f).expect("valid storage");
+        let a = p.acquire().expect("free");
+        let _b = p.acquire().expect("free");
+        assert_eq!(p.release(a), Ok(()));
+        assert_eq!(p.release(a), Err(BufError::NotHeld(a)));
+        assert_eq!(p.free_blocks(), 2, "the refused release pushed nothing");
+        let x = p.acquire().expect("free");
+        let y = p.acquire().expect("free");
+        assert_ne!(x.index(), y.index(), "two owners of one block");
+        assert_eq!(p.acquire(), Err(BufError::Exhausted));
+    }
+
+    #[test]
+    fn stale_copy_cannot_release_the_next_owner() {
+        let (mut s, mut m, mut f) = blocks!(8, 2);
+        let mut p = BlockPool::new(&mut s, &mut m, &mut f).expect("valid storage");
+        let a = p.acquire().expect("free");
+        let stale = a;
+        assert_eq!(p.release(a), Ok(()));
+        let b = p.acquire().expect("free");
+        assert_eq!(a.index(), b.index(), "setup: the block is reused");
+        p.append(b, b"live").expect("fits");
+        assert_eq!(p.release(stale), Err(BufError::NotHeld(stale)));
+        assert_eq!(p.data(b), b"live", "the owner lost its bytes");
+        let c = p.acquire().expect("one block is free");
+        assert_ne!(c.index(), b.index(), "two owners of one block");
+        assert_eq!(p.release(b), Ok(()));
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn blocks_beyond_the_u32_cursors_are_refused() {
+        // Checked on sizes alone, nothing is allocated.
+        let four_gib = u32::MAX as usize + 1;
+        assert_eq!(
+            block_size(four_gib, 1),
+            Err(BufError::BlockTooLarge(four_gib)),
+            "cursor would wrap"
+        );
+        assert_eq!(
+            block_size(2 * four_gib, 2),
+            Err(BufError::BlockTooLarge(four_gib))
+        );
+        // The total may exceed 4 GiB, each block may not.
+        assert_eq!(block_size(2 * (four_gib - 1), 2), Ok(four_gib - 1));
+        assert_eq!(block_size(4 * four_gib, 8), Ok(four_gib / 2));
+    }
+
+    #[test]
+    fn rebuilt_pool_refuses_ids_from_its_last_life() {
+        let (mut s, mut m, mut f) = blocks!(8, 2);
+        let old = {
+            let mut p = BlockPool::new(&mut s, &mut m, &mut f).expect("valid storage");
+            p.acquire().expect("free")
+        };
+        let mut p = BlockPool::new(&mut s, &mut m, &mut f).expect("valid storage");
+        assert_eq!(p.free_blocks(), 2, "every block is free again");
+        let b = p.acquire().expect("free");
+        assert_eq!(old.index(), b.index(), "setup: the block is reused");
+        assert_eq!(p.release(old), Err(BufError::NotHeld(old)));
+        assert_eq!(p.release(b), Ok(()));
+    }
+
+    #[test]
+    fn exhausted_block_generation_retires_the_block() {
+        let (mut s, mut m, mut f) = blocks!(8, 2);
+        let mut p = BlockPool::new(&mut s, &mut m, &mut f).expect("valid storage");
+        // Block 0 is free with one held generation left.
+        p.meta[0].generation = RETIRED - 2;
+        let a = p.acquire().expect("free");
+        assert_eq!((a.index(), a.generation), (0, RETIRED - 1));
+        assert_eq!(p.release(a), Ok(()));
+        assert_eq!(p.retired_blocks(), 1);
+        assert_eq!(p.free_blocks(), 1, "a retired block left the free stack");
+        let b = p.acquire().expect("block 1 is free");
+        assert_eq!(b.index(), 1, "a retired block was reissued");
+        assert_eq!(p.acquire(), Err(BufError::Exhausted));
+        assert_eq!(p.release(a), Err(BufError::NotHeld(a)));
+        assert_eq!(p.release(b), Ok(()));
+        let p = BlockPool::new(&mut s, &mut m, &mut f).expect("valid storage");
+        assert_eq!((p.retired_blocks(), p.free_blocks()), (1, 1), "retirement survives");
     }
 
     #[test]

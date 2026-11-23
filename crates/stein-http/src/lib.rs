@@ -282,7 +282,8 @@ impl<'a> Client<'a> {
         let tx = match self.blocks.acquire() {
             Ok(t) => t,
             Err(_) => {
-                self.blocks.release(rx);
+                let freed = self.blocks.release(rx);
+                debug_assert!(freed.is_ok(), "fresh block refused");
                 return Err(Error::BuffersExhausted);
             }
         };
@@ -296,8 +297,8 @@ impl<'a> Client<'a> {
         }) {
             Some(c) => Ok(c),
             None => {
-                self.blocks.release(rx);
-                self.blocks.release(tx);
+                let freed = (self.blocks.release(rx), self.blocks.release(tx));
+                debug_assert!(freed == (Ok(()), Ok(())), "fresh blocks refused");
                 Err(Error::TooManyConnections)
             }
         }
@@ -312,8 +313,9 @@ impl<'a> Client<'a> {
         if c.body > 0 {
             self.pending_body -= 1;
         }
-        self.blocks.release(c.rx);
-        self.blocks.release(c.tx);
+        // A live row holds both blocks. A refusal is a bug the pool has already contained.
+        let freed = (self.blocks.release(c.rx), self.blocks.release(c.tx));
+        debug_assert!(freed == (Ok(()), Ok(())), "conn row named blocks it did not hold");
         let mut next = c.head;
         while let Some(req) = next {
             next = self.reqs.remove(req).and_then(|r| r.next);
