@@ -1360,7 +1360,8 @@ fn wheel_at(x: f32, y: f32, w: f32) -> Input {
     Input {
         pointer: [x, y],
         pointer_down: false,
-        wheel: [0.0, w],
+        // `w` in notches.
+        wheel: [0.0, w * stein_ui::WHEEL_NOTCH],
         dt: DT,
         ..Input::default()
     }

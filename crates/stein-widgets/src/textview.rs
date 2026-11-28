@@ -265,8 +265,8 @@ impl TextView {
         self.has_sel = st.user[2] & HAS_SEL != 0;
         let inside = self.view.contains(input.pointer);
         if inside {
-            self.offset[1] -= input.wheel[1] * self.style.wheel_lines * self.m.line_h;
-            self.offset[0] -= input.wheel[0] * self.style.wheel_lines * self.m.advance;
+            self.offset[1] -= input.wheel[1] / stein_ui::WHEEL_NOTCH * self.style.wheel_lines * self.m.line_h;
+            self.offset[0] -= input.wheel[0] / stein_ui::WHEEL_NOTCH * self.style.wheel_lines * self.m.advance;
         }
         self.drag_thumbs(ui, &mut st)?;
         if self.style.selectable {

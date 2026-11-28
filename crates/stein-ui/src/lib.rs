@@ -62,6 +62,10 @@ use draw::{CustomRegion, Damage, DrawList, Quad, Shape};
 use stein_core::keyed::{KeyedError, KeyedStore};
 use stein_layout::{BoxSpec, BoxTable, LayoutError, LayoutStorage, Rect};
 
+/// What one mouse wheel notch adds to [`Input::wheel`]. libinput reports a
+/// detent as 15 surface pixels and sway passes that on.
+pub const WHEEL_NOTCH: f32 = 15.0;
+
 /// Everything the frame needs to know about the outside world.
 ///
 /// The pointer delta is computed here rather than supplied, so a platform layer
@@ -73,8 +77,11 @@ use stein_layout::{BoxSpec, BoxTable, LayoutError, LayoutStorage, Rect};
 pub struct Input {
     pub pointer: [f32; 2],
     pub pointer_down: bool,
+    /// Scroll since the last frame in the compositor's surface pixels,
+    /// positive toward the start. A mouse wheel notch is [`WHEEL_NOTCH`] of
+    /// them, a touchpad sends any amount.
     pub wheel: [f32; 2],
-    /// Seconds since the previous frame. Drives animation.
+    /// Seconds since the previous frame, measured. Drives animation.
     pub dt: f32,
     /// Key events since the last frame.
     ///

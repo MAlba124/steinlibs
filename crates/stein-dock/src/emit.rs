@@ -729,7 +729,7 @@ impl DockTree<'_> {
             offset = 0.0;
         }
         if bar.contains(ui.input().pointer) {
-            offset -= ui.input().wheel[1] * style.tab_wheel_step;
+            offset -= ui.input().wheel[1] / stein_ui::WHEEL_NOTCH * style.tab_wheel_step;
         }
         let strip_w = f32::from(self.leaf_len(node)) * tab_w + style.bar_reserve;
         let max = fmax(strip_w - view_w, 0.0);

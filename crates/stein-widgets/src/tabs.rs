@@ -135,7 +135,7 @@ impl Tabs {
             offset = 0.0;
         }
         if style.scrollable && view.contains(ui.input().pointer) {
-            offset -= ui.input().wheel[1] * style.wheel_step;
+            offset -= ui.input().wheel[1] / stein_ui::WHEEL_NOTCH * style.wheel_step;
         }
         st.user[OFFSET] = u64::from(fmax(offset, 0.0).to_bits());
         store(ui, key, st)?;

@@ -16,6 +16,11 @@ pub(crate) fn fmin(a: f32, b: f32) -> f32 {
 }
 
 #[inline]
+pub(crate) fn fabs(v: f32) -> f32 {
+    if v < 0.0 { -v } else { v }
+}
+
+#[inline]
 pub(crate) fn clampf(v: f32, lo: f32, hi: f32) -> f32 {
     fmin(fmax(v, lo), hi)
 }

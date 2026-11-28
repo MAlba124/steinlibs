@@ -92,11 +92,20 @@ fn at(x: f32, y: f32, down: bool) -> Input {
     }
 }
 
+/// No easing, so an offset lands in the frame that moved it.
+fn instant() -> ScrollStyle {
+    ScrollStyle {
+        smooth: 0.0,
+        ..ScrollStyle::default()
+    }
+}
+
 fn wheeled(x: f32, y: f32, w: f32) -> Input {
     Input {
         pointer: [x, y],
         pointer_down: false,
-        wheel: [0.0, w],
+        // `w` in notches.
+        wheel: [0.0, w * stein_ui::WHEEL_NOTCH],
         dt: DT,
         ..Input::default()
     }
@@ -127,7 +136,7 @@ fn scroll_frame_sized(
     vp: [f32; 2],
 ) -> ScrollOut {
     u.begin_frame(input, vp);
-    let sa = ScrollArea::begin(u, SKEY, Axis::Y, size, ScrollStyle::default()).expect("begin");
+    let sa = ScrollArea::begin(u, SKEY, Axis::Y, size, instant()).expect("begin");
     let vl = VirtualList::begin(u, LKEY, sa.offset(), sa.view_len(), rows, row_h).expect("vlist");
     let range = vl.range();
     for i in range.first..range.end {
@@ -354,7 +363,7 @@ fn plain_children_scroll_against_solved_content() {
             SKEY,
             Axis::Y,
             [SizeSpec::px(400.0), SizeSpec::px(300.0)],
-            ScrollStyle::default(),
+            instant(),
         )
         .expect("begin");
         for i in 0..10u64 {
@@ -645,7 +654,7 @@ fn rows_frame(u: &mut Ui, input: Input, order: &[u64; 3]) -> ([Response; 3], [Op
         SKEY,
         Axis::Y,
         [SizeSpec::px(400.0), SizeSpec::px(300.0)],
-        ScrollStyle::default(),
+        instant(),
     )
     .expect("scroll begin");
     let vl = VirtualList::begin(u, LKEY, sa.offset(), sa.view_len(), 3, 40.0).expect("vlist");
@@ -2158,4 +2167,92 @@ fn scrolling_away_from_the_selected_tab_is_not_undone() {
     // And it stays there.
     let o = scroll_tabs_frame(&mut u, idle, 6, 200.0, 90.0);
     assert!(o.offset > 0.0);
+}
+
+// Smooth scrolling: the wheel moves a target, the offset eases to it.
+
+/// One frame of a 300 px area over 100 rows of 20 px with the default,
+/// easing style. The offset, whether another frame is owed, and the
+/// thumb's quad.
+fn smooth_frame(u: &mut Ui, input: Input) -> (f32, bool, Option<stein_ui::draw::Quad>) {
+    u.begin_frame(input, [400.0, 300.0]);
+    let size = [SizeSpec::px(400.0), SizeSpec::px(300.0)];
+    let sa = ScrollArea::begin(u, SKEY, Axis::Y, size, ScrollStyle::default()).expect("begin");
+    let vl = VirtualList::begin(u, LKEY, sa.offset(), sa.view_len(), 100, 20.0).expect("vlist");
+    for i in vl.range().first..vl.range().end {
+        vl.row(u, 1_000 + u64::from(i), 0xff33_3344).expect("row");
+    }
+    vl.end(u).expect("vlist end");
+    let sa = sa.end(u).expect("scroll end");
+    u.end_frame().expect("closed");
+    let thumb = u.geometry_of(sa.thumb_index()).map(|g| g.0);
+    let quad = u.quads().iter().find(|q| Some(q.rect) == thumb).copied();
+    let owed = u.finish().needs_present;
+    (sa.offset(), owed, quad)
+}
+
+#[test]
+fn a_wheel_notch_eases_to_one_step_and_then_lets_the_window_sleep() {
+    ui!(u);
+    let idle = at(200.0, 150.0, false);
+    smooth_frame(&mut u, idle);
+    smooth_frame(&mut u, idle);
+    let step = ScrollStyle::default().wheel_step;
+    let (first, owed, _) = smooth_frame(&mut u, wheeled(200.0, 150.0, -1.0));
+    assert!(first > 0.0 && first < step, "the first frame moves part way, {first}");
+    assert!(owed, "a frame is owed while it moves");
+    let mut last = first;
+    let mut frames = 0;
+    loop {
+        let (offset, owed, _) = smooth_frame(&mut u, idle);
+        assert!(offset >= last, "eases one way, {offset} after {last}");
+        last = offset;
+        frames += 1;
+        if !owed {
+            break;
+        }
+        assert!(frames < 120, "never landed");
+    }
+    assert_eq!(last, step, "lands exactly one notch down");
+    assert!(frames < 40, "took {frames} frames");
+}
+
+#[test]
+fn notches_in_quick_succession_add_up() {
+    ui!(u);
+    let idle = at(200.0, 150.0, false);
+    smooth_frame(&mut u, idle);
+    smooth_frame(&mut u, idle);
+    for _ in 0..3 {
+        smooth_frame(&mut u, wheeled(200.0, 150.0, -1.0));
+    }
+    let mut last = 0.0;
+    for _ in 0..120 {
+        last = smooth_frame(&mut u, idle).0;
+    }
+    assert_eq!(last, 3.0 * ScrollStyle::default().wheel_step);
+}
+
+#[test]
+fn an_offset_written_from_outside_is_jumped_to_not_eased_away() {
+    ui!(u);
+    let idle = at(200.0, 150.0, false);
+    smooth_frame(&mut u, idle);
+    smooth_frame(&mut u, idle);
+    u.state(SKEY).expect("room").scroll[1] = 500.0;
+    let (offset, _, _) = smooth_frame(&mut u, idle);
+    assert_eq!(offset, 500.0);
+    let (offset, owed, _) = smooth_frame(&mut u, idle);
+    assert_eq!(offset, 500.0, "stays where it was put");
+    assert!(!owed);
+}
+
+#[test]
+fn the_bar_is_rounded() {
+    ui!(u);
+    let idle = at(-1.0, -1.0, false);
+    smooth_frame(&mut u, idle);
+    let (_, _, thumb) = smooth_frame(&mut u, idle);
+    let thumb = thumb.expect("the thumb painted");
+    assert_eq!(thumb.shape, stein_ui::draw::Shape::PILL);
 }

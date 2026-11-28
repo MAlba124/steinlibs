@@ -12,14 +12,20 @@
 //! The bar is sized in parent fractions, so the thumb tracks the solved
 //! track extent in the same frame. Only the visible fraction itself is a
 //! frame behind.
+//!
+//! The wheel and paging move a target, and the offset eases toward it at
+//! [`ScrollStyle::smooth`], asking for frames until it lands. Dragging the
+//! thumb moves both at once, so the content stays under the pointer. An
+//! offset written into the state from outside is seen and jumped to.
 
 use stein_layout::{Axis, BoxSpec, Rect, SizeSpec};
 use stein_theme::Theme;
-use stein_ui::Ui;
+use stein_ui::draw::Shape;
 use stein_ui::key::{child, hash_str};
+use stein_ui::{Ui, WHEEL_NOTCH};
 
 use crate::WidgetError;
-use crate::util::{axis_index, axis_of, clampf, cross_of, fmax, fmin, load, sized, store};
+use crate::util::{axis_index, axis_of, clampf, cross_of, fabs, fmax, fmin, load, sized, store};
 
 /// Bar metrics and fills. Alpha lives in the top byte, zero alpha never paints.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -27,8 +33,13 @@ pub struct ScrollStyle {
     pub bar_size: f32,
     /// Floor on the thumb in pixels, so a huge document keeps a grabbable thumb.
     pub min_thumb: f32,
-    /// Pixels per wheel unit. Positive wheel moves content toward the start.
+    /// Pixels per wheel notch. Positive wheel moves content toward the start.
     pub wheel_step: f32,
+    /// How fast the offset eases toward where the wheel sent it, per second.
+    /// Zero jumps straight there.
+    pub smooth: f32,
+    /// Outline of the track and the thumb.
+    pub shape: Shape,
     pub track_fill: u32,
     pub thumb_fill: u32,
     pub thumb_hot_fill: u32,
@@ -45,7 +56,9 @@ impl From<&Theme> for ScrollStyle {
         ScrollStyle {
             bar_size: t.size.scrollbar,
             min_thumb: t.size.min_thumb,
-            wheel_step: 30.0,
+            wheel_step: 60.0,
+            smooth: 22.0,
+            shape: Shape::PILL,
             track_fill: t.pane,
             thumb_fill: t.faint,
             thumb_hot_fill: t.dim,
@@ -67,7 +80,8 @@ pub struct ScrollArea {
 }
 
 /// Flag bits in `user[0]` of the main key's state. `user[1]` holds the
-/// offset at the start of a thumb drag, as f32 bits.
+/// offset at the start of a thumb drag, `user[2]` the target the offset
+/// eases toward and `user[3]` the offset last written, all as f32 bits.
 const HELD_THUMB: u64 = 1;
 const HELD_TRACK: u64 = 2;
 
@@ -156,46 +170,74 @@ impl ScrollArea {
             // the frame that reads it is owed now.
             ui.request_repaint();
         }
-        self.offset = st.scroll[self.a];
+        let shown = st.scroll[self.a];
+        // A write from outside leaves the state disagreeing with what this
+        // widget stored, and is where the target goes.
+        let mut target = if st.user[3] == u64::from(shown.to_bits()) {
+            f32::from_bits(st.user[2] as u32)
+        } else {
+            shown
+        };
+        self.offset = shown;
         if self.view_rect.contains(input.pointer) {
-            self.offset -= input.wheel[self.a] * self.style.wheel_step;
+            target -= input.wheel[self.a] / WHEEL_NOTCH * self.style.wheel_step;
         }
         let movable = self.view_len * (1.0 - self.thumb_frac());
         let held = ui.peek_active(k_thumb(self.key));
         if held && st.user[0] & HELD_THUMB == 0 {
-            st.user[1] = u64::from(self.offset.to_bits());
+            st.user[1] = u64::from(shown.to_bits());
         }
         if held && movable > 0.0 {
             // The offset anchored at the press plus the drag total, so a long
             // drag cannot accumulate per frame rounding.
             let anchor = f32::from_bits(st.user[1] as u32);
             let total = ui.peek_drag(k_thumb(self.key)).total[self.a];
-            self.offset = anchor + total * (max_scroll / movable);
+            target = anchor + total * (max_scroll / movable);
         }
-        self.offset = clampf(self.offset, 0.0, max_scroll);
         let track_held = ui.peek_active(k_track(self.key)) || ui.peek_active(k_space(self.key));
         if track_held && st.user[0] & HELD_TRACK == 0 {
-            self.page(input.pointer[self.a], movable, max_scroll);
+            target = self.page(target, input.pointer[self.a], movable, max_scroll);
         }
-        self.offset = clampf(self.offset, 0.0, max_scroll);
+        let target = clampf(target, 0.0, max_scroll);
+        self.offset = clampf(self.ease(ui, shown, target, held, input.dt), 0.0, max_scroll);
         st.user[0] = u64::from(held) * HELD_THUMB + u64::from(track_held) * HELD_TRACK;
+        st.user[2] = u64::from(target.to_bits());
+        st.user[3] = u64::from(self.offset.to_bits());
         st.scroll[self.a] = self.offset;
         store(ui, self.key, st)
     }
 
-    /// One page per press, toward the click relative to the thumb. The caller
-    /// gates on the press edge, and counts the lead spacer as track since it
-    /// is a hit target covering the track above the thumb.
-    fn page(&mut self, p: f32, movable: f32, max_scroll: f32) {
+    /// One frame of the offset moving toward `target`. Lands within half a
+    /// pixel, and owes another frame until then.
+    fn ease(&self, ui: &mut Ui, shown: f32, target: f32, dragging: bool, dt: f32) -> f32 {
+        if dragging || self.style.smooth <= 0.0 {
+            return target;
+        }
+        let k = self.style.smooth * fmax(dt, 0.0);
+        let next = shown + (target - shown) * (k / (1.0 + k));
+        if fabs(target - next) <= 0.5 {
+            return target;
+        }
+        ui.request_repaint();
+        next
+    }
+
+    /// One page per press from `target`, toward the click relative to the
+    /// thumb as drawn. The caller gates on the press edge, and counts the
+    /// lead spacer as track since it is a hit target covering the track
+    /// above the thumb.
+    fn page(&self, target: f32, p: f32, movable: f32, max_scroll: f32) -> f32 {
         if max_scroll <= 0.0 {
-            return;
+            return target;
         }
         let thumb_len = self.view_len * self.thumb_frac();
         let thumb_start = self.view_rect.min[self.a] + movable * self.offset / max_scroll;
         if p < thumb_start {
-            self.offset -= self.view_len;
+            target - self.view_len
         } else if p > thumb_start + thumb_len {
-            self.offset += self.view_len;
+            target + self.view_len
+        } else {
+            target
         }
     }
 
@@ -244,6 +286,7 @@ impl ScrollArea {
             BoxSpec::container(axis_of(self.a)).w(ts[0]).h(ts[1]),
             self.style.track_fill,
         )?;
+        ui.shape(self.style.shape);
         self.track_index = ui.last_index();
         let sp = sized(self.a, SizeSpec::fraction(lead), SizeSpec::grow());
         ui.leaf(k_space(self.key), BoxSpec::leaf().w(sp[0]).h(sp[1]), 0)?;
@@ -255,6 +298,7 @@ impl ScrollArea {
         };
         let th = sized(self.a, SizeSpec::fraction(frac), SizeSpec::grow());
         ui.leaf(k_thumb(self.key), BoxSpec::leaf().w(th[0]).h(th[1]), fill)?;
+        ui.shape(self.style.shape);
         self.thumb_index = ui.last_index();
         ui.close()?;
         Ok(())
