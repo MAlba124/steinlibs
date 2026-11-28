@@ -208,10 +208,10 @@ fn overlaps(ui: &mut Ui<'_>, text: &mut Text) -> Out {
         ([180.0, 10.0], 0xb0fd_e047),
     ];
     for (i, (at, color)) in circles.into_iter().enumerate() {
-        ui.leaf(seeded(k, 3, i as u64), sized(90.0, 90.0).floating(at), color)?;
+        ui.leaf(seeded(k, 3, i as u64), sized(90.0, 90.0).absolute(at), color)?;
         ui.shape(Shape::PILL);
     }
-    ui.leaf(child(k, 4), sized(80.0, 50.0).floating([280.0, 30.0]), 0x60ff_ffff)?;
+    ui.leaf(child(k, 4), sized(80.0, 50.0).absolute([280.0, 30.0]), 0x60ff_ffff)?;
     ui.shape(Shape::round(10).stroked(2));
     ui.close()?;
     ui.close()?;
@@ -391,7 +391,7 @@ fn toggle(ui: &mut Ui<'_>, k: u64, on: bool) -> Result<Response, GalleryError> {
     let response = ui.open(k, sized(44.0, 26.0), mix(LINE, ACCENT, t))?;
     ui.shape(Shape::PILL);
     let x = 3.0 + t * (44.0 - 20.0 - 6.0);
-    ui.leaf(child(k, 2), sized(20.0, 20.0).floating([x, 3.0]).passive(), BG)?;
+    ui.leaf(child(k, 2), sized(20.0, 20.0).absolute([x, 3.0]).passive(), BG)?;
     ui.shape(Shape::PILL);
     ui.close()?;
     Ok(response)
@@ -408,13 +408,13 @@ fn slider(ui: &mut Ui<'_>, k: u64, value: f32) -> Result<f32, GalleryError> {
         value = ((ui.input().pointer[0] - rect.min[0]) / width).clamp(0.0, 1.0);
     }
     let lit = ui.animate(child(k, 1), f32::from(u8::from(response.hovered || response.active)), 16.0);
-    ui.leaf(child(k, 2), sized(width, 4.0).floating([0.0, 10.0]).passive(), LINE)?;
+    ui.leaf(child(k, 2), sized(width, 4.0).absolute([0.0, 10.0]).passive(), LINE)?;
     ui.shape(Shape::PILL);
-    ui.leaf(child(k, 3), sized((value * width).max(4.0), 4.0).floating([0.0, 10.0]).passive(), mix(SOFT, ACCENT, lit))?;
+    ui.leaf(child(k, 3), sized((value * width).max(4.0), 4.0).absolute([0.0, 10.0]).passive(), mix(SOFT, ACCENT, lit))?;
     ui.shape(Shape::PILL);
     let knob = 10.0 + 4.0 * lit;
     let at = [value * width - knob * 0.5, 12.0 - knob * 0.5];
-    ui.leaf(child(k, 4), sized(knob, knob).floating(at).passive(), TEXT)?;
+    ui.leaf(child(k, 4), sized(knob, knob).absolute(at).passive(), TEXT)?;
     ui.shape(Shape::PILL);
     ui.close()?;
     Ok(value)
@@ -424,12 +424,12 @@ fn motion(ui: &mut Ui<'_>, text: &mut Text, demo: &mut Demo) -> Out {
     let k = section(ui, text, "Easing")?;
     let clock = demo.clock;
     ui.open(child(k, 2), sized(420.0, 30.0).w(SizeSpec::px(420.0)), 0)?;
-    ui.leaf(child(k, 3), sized(420.0, 4.0).floating([0.0, 13.0]), LINE)?;
+    ui.leaf(child(k, 3), sized(420.0, 4.0).absolute([0.0, 13.0]), LINE)?;
     ui.shape(Shape::PILL);
     let phase = (clock / 1.6).fract();
     let swing = if phase < 0.5 { phase * 2.0 } else { 2.0 - phase * 2.0 };
     let eased = swing * swing * (3.0 - 2.0 * swing);
-    ui.leaf(child(k, 4), sized(24.0, 24.0).floating([eased * 396.0, 3.0]), ACCENT)?;
+    ui.leaf(child(k, 4), sized(24.0, 24.0).absolute([eased * 396.0, 3.0]), ACCENT)?;
     ui.shape(Shape::PILL);
     ui.close()?;
     ui.close()?;
@@ -440,7 +440,7 @@ fn motion(ui: &mut Ui<'_>, text: &mut Text, demo: &mut Demo) -> Out {
     let pulse = 40.0 + 14.0 * (clock * 4.0).sin().abs();
     ui.open(child(k, 5), sized(72.0, 72.0).w(SizeSpec::px(72.0)), 0)?;
     let inset = (72.0 - pulse) * 0.5;
-    ui.leaf(child(k, 6), sized(pulse, pulse).floating([inset, inset]), mix(ACCENT, 0x00ff_8a4c, (pulse - 40.0) / 28.0))?;
+    ui.leaf(child(k, 6), sized(pulse, pulse).absolute([inset, inset]), mix(ACCENT, 0x00ff_8a4c, (pulse - 40.0) / 28.0))?;
     ui.shape(Shape::PILL);
     ui.close()?;
     ui.close()?;
@@ -475,7 +475,7 @@ fn spinner(ui: &mut Ui<'_>, k: u64, clock: f32) -> Out {
         let angle = i as f32 / 8.0 * std::f32::consts::TAU;
         let behind = (head - i as f32).rem_euclid(8.0) / 8.0;
         let at = [28.0 + 24.0 * angle.cos() - 4.0, 28.0 + 24.0 * angle.sin() - 4.0];
-        ui.leaf(seeded(k, 1, i), sized(10.0, 10.0).floating(at), mix(TEXT, PANEL, behind))?;
+        ui.leaf(seeded(k, 1, i), sized(10.0, 10.0).absolute(at), mix(TEXT, PANEL, behind))?;
         ui.shape(Shape::PILL);
     }
     ui.close()?;

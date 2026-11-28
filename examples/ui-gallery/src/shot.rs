@@ -5,7 +5,8 @@
 //! ```
 //!
 //! Every step is one frame. `wait:N` builds N frames with no input, which
-//! is how animations are caught mid way and hovers settle.
+//! is how animations are caught mid way and hovers settle. `wheel:N` turns
+//! the wheel N notches down, negative for up, over the pointer.
 
 use stein_shell::paint::{Atlas, Images, clear_region, paint};
 use stein_ui::{Button, ButtonEvent, Input, KeyEvent, Mods, keys};
@@ -20,6 +21,7 @@ pub enum Step {
     Type(String),
     Key(u32, Mods),
     Wait(u32),
+    Wheel(f32),
 }
 
 #[derive(Debug)]
@@ -32,7 +34,7 @@ pub enum ShotError {
 impl std::fmt::Display for ShotError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ShotError::BadStep(s) => write!(f, "bad step {s:?}, want move:X,Y click:X,Y type:TEXT key:NAME wait:N"),
+            ShotError::BadStep(s) => write!(f, "bad step {s:?}, want move:X,Y click:X,Y type:TEXT key:NAME wait:N wheel:N"),
             ShotError::Frame(e) => write!(f, "frame: {e}"),
             ShotError::Write(e) => write!(f, "write: {e}"),
         }
@@ -63,6 +65,7 @@ pub fn parse(script: &str) -> Result<Vec<Step>, ShotError> {
             "click" => Step::Click(point()?),
             "type" => Step::Type(arg.to_string()),
             "wait" => Step::Wait(arg.parse().map_err(|_| bad())?),
+            "wheel" => Step::Wheel(arg.parse().map_err(|_| bad())?),
             "key" => key_step(arg).ok_or_else(bad)?,
             _ => return Err(bad()),
         });
@@ -165,6 +168,11 @@ fn run_step(gallery: &mut Gallery, held: &mut Held, step: &Step, view: [f32; 2])
                 repeat: false,
                 mods: *mods,
             });
+            gallery.frame(input, view)
+        }
+        Step::Wheel(notches) => {
+            let mut input = held.input();
+            input.wheel = [0.0, -notches * stein_ui::WHEEL_NOTCH];
             gallery.frame(input, view)
         }
         Step::Wait(frames) => (0..*frames).try_for_each(|_| gallery.frame(held.input(), view)),
