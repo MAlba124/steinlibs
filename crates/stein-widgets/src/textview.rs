@@ -521,7 +521,8 @@ impl TextView {
         } else {
             0.0
         };
-        let bar = self.style.bar.bar_size;
+        let shown = crate::scroll::bar_shown(&self.style.bar, max);
+        let bar = if shown { self.style.bar.bar_size } else { 0.0 };
         let (bw, bh) = if a == 0 {
             (SizeSpec::grow(), SizeSpec::px(bar))
         } else {
@@ -531,7 +532,7 @@ impl TextView {
         ui.open(
             k_bar(self.key, a),
             BoxSpec::container(axis).w(bw).h(bh),
-            self.style.bar.track_fill,
+            if shown { self.style.bar.track_fill } else { 0 },
         )?;
         let (lw, lh) = if a == 0 {
             (SizeSpec::fraction(lead), SizeSpec::grow())
@@ -544,10 +545,10 @@ impl TextView {
             0,
         )?;
         let hot = ui.peek_hovered(k_thumb(self.key, a)) || ui.peek_active(k_thumb(self.key, a));
-        let fill = if hot {
-            self.style.bar.thumb_hot_fill
-        } else {
-            self.style.bar.thumb_fill
+        let fill = match (shown, hot) {
+            (false, _) => 0,
+            (true, true) => self.style.bar.thumb_hot_fill,
+            (true, false) => self.style.bar.thumb_fill,
         };
         let (tw, th) = if a == 0 {
             (SizeSpec::fraction(frac), SizeSpec::grow())

@@ -1473,12 +1473,13 @@ fn scrolling_stops_at_the_end_of_the_document() {
     settled(&mut u, 100, 40);
     u.state(VKEY).expect("room").scroll[1] = 9.0e9;
     let o = settled(&mut u, 100, 40);
-    // 100 lines of 10px in a 190px view leaves 810px of travel.
-    assert!((o.offset[1] - 810.0).abs() < 0.01, "{:?}", o.offset);
+    // 40 columns fit, so the horizontal bar hides and 100 lines of 10px in
+    // a 200px view leave 800px of travel.
+    assert!((o.offset[1] - 800.0).abs() < 0.01, "{:?}", o.offset);
     assert_eq!(
         o.visible,
         LineRange {
-            first: 81,
+            first: 80,
             end: 100
         }
     );
@@ -1517,9 +1518,9 @@ fn horizontal_extent_comes_from_the_widest_line() {
     settled(&mut u, 10, 200);
     u.state(VKEY).expect("room").scroll[0] = 9.0e9;
     let o = settled(&mut u, 10, 200);
-    // 200 columns of 8px is 1600, a 400px view leaves 1200 of travel, and the
-    // vertical bar takes 10 of the width.
-    let expect = 200.0 * ADV - (VW - 10.0);
+    // 200 columns of 8px is 1600 and a 400px view leaves 1200 of travel. Ten
+    // lines fit, so the vertical bar is hidden and takes no width.
+    let expect = 200.0 * ADV - VW;
     assert!((o.offset[0] - expect).abs() < 0.01, "{:?}", o.offset);
     assert_eq!(o.first_col, (expect / ADV) as u32);
 }
@@ -1813,11 +1814,12 @@ fn page_down_moves_by_a_viewport_and_drags_the_view_with_it() {
     text_frame(&mut u, at(4.0, 5.0, true), 1_000, 40);
     text_frame(&mut u, at(4.0, 5.0, false), 1_000, 40);
     let o = key_frame(&mut u, stein_ui::keys::PAGE_DOWN, false, 1_000, 40);
-    // 190px of view at 10px a line is 19 lines.
-    assert_eq!(o.caret.line, 19);
+    // 40 columns fit, so no horizontal bar, and 200px of view at 10px a
+    // line is 20 lines.
+    assert_eq!(o.caret.line, 20);
     // And the caret stayed visible rather than running off the bottom.
     assert!(
-        o.visible.first <= 19 && 19 < o.visible.end,
+        o.visible.first <= 20 && 20 < o.visible.end,
         "{:?}",
         o.visible
     );
@@ -2255,4 +2257,84 @@ fn the_bar_is_rounded() {
     let (_, _, thumb) = smooth_frame(&mut u, idle);
     let thumb = thumb.expect("the thumb painted");
     assert_eq!(thumb.shape, stein_ui::draw::Shape::PILL);
+}
+
+// Auto hide: a bar only takes room and paints while there is something to scroll.
+
+/// One frame of a 400x300 area over `rows` rows of 20 px. The viewport and
+/// track rects and how many quads the bar painted.
+fn hide_frame(u: &mut Ui, rows: u32, style: ScrollStyle) -> (Option<Rect>, Option<Rect>, usize) {
+    u.begin_frame(at(-1.0, -1.0, false), [400.0, 300.0]);
+    let size = [SizeSpec::px(400.0), SizeSpec::px(300.0)];
+    let sa = ScrollArea::begin(u, SKEY, Axis::Y, size, style).expect("begin");
+    let vl = VirtualList::begin(u, LKEY, sa.offset(), sa.view_len(), rows, 20.0).expect("vlist");
+    for i in vl.range().first..vl.range().end {
+        vl.row(u, 1_000 + u64::from(i), 0xff33_3344).expect("row");
+    }
+    vl.end(u).expect("vlist end");
+    let sa = sa.end(u).expect("scroll end");
+    u.end_frame().expect("closed");
+    let view = u.geometry_of(sa.viewport_index()).map(|g| g.0);
+    let track = u.geometry_of(sa.track_index()).map(|g| g.0);
+    let thumb = u.geometry_of(sa.thumb_index()).map(|g| g.0);
+    let bar_quads = u
+        .quads()
+        .iter()
+        .filter(|q| Some(q.rect) == track || Some(q.rect) == thumb)
+        .count();
+    u.finish();
+    (view, track, bar_quads)
+}
+
+fn width(r: Option<Rect>) -> f32 {
+    r.map_or(-1.0, |r| r.max[0] - r.min[0])
+}
+
+#[test]
+fn content_that_fits_hides_the_bar_and_gives_its_width_back() {
+    ui!(u);
+    for _ in 0..3 {
+        hide_frame(&mut u, 5, instant());
+    }
+    let (view, track, quads) = hide_frame(&mut u, 5, instant());
+    assert_eq!(width(view), 400.0);
+    assert_eq!(width(track), 0.0);
+    assert_eq!(quads, 0, "a hidden bar paints nothing");
+}
+
+#[test]
+fn content_that_overflows_shows_the_bar() {
+    ui!(u);
+    for _ in 0..3 {
+        hide_frame(&mut u, 100, instant());
+    }
+    let bar = instant().bar_size;
+    let (view, track, quads) = hide_frame(&mut u, 100, instant());
+    assert_eq!(width(view), 400.0 - bar);
+    assert_eq!(width(track), bar);
+    assert_eq!(quads, 2, "track and thumb");
+}
+
+#[test]
+fn growing_content_brings_the_bar_back_and_shrinking_hides_it() {
+    ui!(u);
+    let rows = [5, 5, 5, 100, 100, 100, 5, 5, 5];
+    let shown = rows.map(|n| width(hide_frame(&mut u, n, instant()).1) > 0.0);
+    // Content length is read from the previous solve, so each change lands a frame late.
+    assert_eq!(shown, [false, false, false, false, true, true, true, false, false]);
+}
+
+#[test]
+fn a_bar_that_may_not_hide_stays_with_nothing_to_scroll() {
+    ui!(u);
+    let style = ScrollStyle {
+        auto_hide: false,
+        ..instant()
+    };
+    for _ in 0..3 {
+        hide_frame(&mut u, 5, style);
+    }
+    let (_, track, quads) = hide_frame(&mut u, 5, style);
+    assert_eq!(width(track), style.bar_size);
+    assert_eq!(quads, 2);
 }

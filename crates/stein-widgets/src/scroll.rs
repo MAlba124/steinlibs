@@ -40,6 +40,8 @@ pub struct ScrollStyle {
     pub smooth: f32,
     /// Outline of the track and the thumb.
     pub shape: Shape,
+    /// Collapse the bar to nothing while the content fits.
+    pub auto_hide: bool,
     pub track_fill: u32,
     pub thumb_fill: u32,
     pub thumb_hot_fill: u32,
@@ -59,6 +61,7 @@ impl From<&Theme> for ScrollStyle {
             wheel_step: 60.0,
             smooth: 22.0,
             shape: Shape::PILL,
+            auto_hide: true,
             track_fill: t.pane,
             thumb_fill: t.faint,
             thumb_hot_fill: t.dim,
@@ -96,6 +99,11 @@ fn k_space(key: u64) -> u64 {
 }
 fn k_thumb(key: u64) -> u64 {
     child(key, hash_str("scroll.thumb"))
+}
+
+/// A bar shows unless it may hide and there is nothing to scroll.
+pub(crate) fn bar_shown(style: &ScrollStyle, max_scroll: f32) -> bool {
+    !style.auto_hide || max_scroll > 0.0
 }
 
 impl ScrollArea {
@@ -270,8 +278,14 @@ impl ScrollArea {
         Ok(self)
     }
 
+    /// Whether the bar is drawn this frame.
+    pub fn bar_shown(&self) -> bool {
+        bar_shown(&self.style, self.max_scroll_of())
+    }
+
     /// Bar parts are fractions of the track, so they follow the solved track
-    /// in the same frame. Only the visible fraction lags by one.
+    /// in the same frame. Only the visible fraction lags by one. A hidden bar
+    /// keeps its boxes at zero thickness, so its keys and indices stay valid.
     fn emit_bar(&mut self, ui: &mut Ui) -> Result<(), WidgetError> {
         let frac = self.thumb_frac();
         let max_scroll = self.max_scroll_of();
@@ -280,21 +294,23 @@ impl ScrollArea {
         } else {
             0.0
         };
-        let ts = sized(self.a, SizeSpec::grow(), SizeSpec::px(self.style.bar_size));
+        let shown = self.bar_shown();
+        let thickness = if shown { self.style.bar_size } else { 0.0 };
+        let ts = sized(self.a, SizeSpec::grow(), SizeSpec::px(thickness));
         ui.open(
             k_track(self.key),
             BoxSpec::container(axis_of(self.a)).w(ts[0]).h(ts[1]),
-            self.style.track_fill,
+            if shown { self.style.track_fill } else { 0 },
         )?;
         ui.shape(self.style.shape);
         self.track_index = ui.last_index();
         let sp = sized(self.a, SizeSpec::fraction(lead), SizeSpec::grow());
         ui.leaf(k_space(self.key), BoxSpec::leaf().w(sp[0]).h(sp[1]), 0)?;
         let hot = ui.peek_hovered(k_thumb(self.key)) || ui.peek_active(k_thumb(self.key));
-        let fill = if hot {
-            self.style.thumb_hot_fill
-        } else {
-            self.style.thumb_fill
+        let fill = match (shown, hot) {
+            (false, _) => 0,
+            (true, true) => self.style.thumb_hot_fill,
+            (true, false) => self.style.thumb_fill,
         };
         let th = sized(self.a, SizeSpec::fraction(frac), SizeSpec::grow());
         ui.leaf(k_thumb(self.key), BoxSpec::leaf().w(th[0]).h(th[1]), fill)?;
