@@ -62,6 +62,28 @@ use draw::{CustomRegion, Damage, DrawList, Quad, Shape};
 use stein_core::keyed::{KeyedError, KeyedStore};
 use stein_layout::{BoxSpec, BoxTable, LayoutError, LayoutStorage, Rect};
 
+/// The fraction of the way to its target an exponential ease covers in
+/// `dt` seconds at `rate` per second, `1 - exp(-rate * dt)`.
+///
+/// Exact rather than a per frame approximation, so one frame of 1/60 covers
+/// what two of 1/120 do and an ease runs at the same speed on any display.
+/// `core` has no `exp`: this is its series to the fourth power on a
+/// sixteenth of the argument, squared four times, within 1e-5 of the real
+/// thing for any step a frame takes.
+pub fn ease_step(rate: f32, dt: f32) -> f32 {
+    let x = fmax(rate, 0.0) * fmax(dt, 0.0);
+    if x >= 32.0 {
+        return 1.0;
+    }
+    let y = x / 16.0;
+    // Even degree, so positive for every y.
+    let mut decay = 1.0 - y + y * y / 2.0 - y * y * y / 6.0 + y * y * y * y / 24.0;
+    for _ in 0..4 {
+        decay *= decay;
+    }
+    1.0 - decay
+}
+
 /// What one mouse wheel notch adds to [`Input::wheel`]. libinput reports a
 /// detent as 15 surface pixels and sway passes that on.
 pub const WHEEL_NOTCH: f32 = 15.0;
@@ -844,9 +866,8 @@ impl<'a> Ui<'a> {
 
     /// Move a widget's animation toward `target` and return where it got to.
     ///
-    /// The step is `k / (1 + k)` for `k = rate * dt`, which approximates
-    /// `1 - exp(-rate * dt)` without pulling in libm, never overshoots at any
-    /// frame time, and slows rather than jumps when a frame runs long.
+    /// The step is [`ease_step`], so the motion is the same at any refresh
+    /// rate and never overshoots.
     pub fn animate(&mut self, key: u64, target: f32, rate: f32) -> f32 {
         let dt = self.input.dt;
         let frame = self.frame;
@@ -857,10 +878,7 @@ impl<'a> Ui<'a> {
             return target;
         };
         st.anim_target = target;
-        let k = fmax(rate, 0.0) * fmax(dt, 0.0);
-        if k > 0.0 {
-            st.anim += (target - st.anim) * (k / (1.0 + k));
-        }
+        st.anim += (target - st.anim) * ease_step(rate, dt);
         let v = st.anim;
         if fabs(target - v) > 0.001 {
             // Owe another frame, or the transition stops halfway when the window

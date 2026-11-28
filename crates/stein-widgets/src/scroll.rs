@@ -213,8 +213,8 @@ impl ScrollArea {
         if dragging || self.style.smooth <= 0.0 {
             return target;
         }
-        let k = self.style.smooth * fmax(dt, 0.0);
-        let next = shown + (target - shown) * (k / (1.0 + k));
+        // Exact exponential, so the glide takes as long at any refresh rate.
+        let next = shown + (target - shown) * stein_ui::ease_step(self.style.smooth, dt);
         if fabs(target - next) <= 0.5 {
             return target;
         }

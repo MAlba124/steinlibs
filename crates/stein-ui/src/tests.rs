@@ -990,3 +990,34 @@ fn moving_focus_asks_for_a_frame() {
         "the focus change was not going to be drawn"
     );
 }
+
+#[test]
+fn an_ease_step_is_the_real_exponential_at_any_frame_length() {
+    for (rate, dt) in [(22.0f32, 1.0 / 60.0), (22.0, 1.0 / 240.0), (16.0, 0.1), (5.0, 0.004), (40.0, 0.05)] {
+        let want = 1.0 - (-(rate * dt) as f64).exp() as f32;
+        let got = ease_step(rate, dt);
+        assert!((got - want).abs() < 1e-5, "rate {rate} dt {dt}: {got} against {want}");
+    }
+    assert_eq!(ease_step(0.0, 0.1), 0.0);
+    assert_eq!(ease_step(10.0, -1.0), 0.0);
+    assert_eq!(ease_step(1e6, 1.0), 1.0);
+}
+
+#[test]
+fn an_animation_covers_the_same_ground_in_a_second_at_any_refresh_rate() {
+    let after_a_second = |hz: u32| {
+        ui!(u);
+        let mut v = 0.0;
+        for _ in 0..hz / 4 {
+            let mut input = at(-1.0, -1.0, false);
+            input.dt = 1.0 / hz as f32;
+            u.begin_frame(input, [400.0, 300.0]);
+            v = u.animate(7, 100.0, 8.0);
+            u.end_frame().expect("closed");
+            u.finish();
+        }
+        v
+    };
+    let (slow, fast) = (after_a_second(60), after_a_second(240));
+    assert!((slow - fast).abs() < 0.01, "60 Hz {slow}, 240 Hz {fast}");
+}
