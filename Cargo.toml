@@ -23,6 +23,16 @@ stein-json = { path = "crates/stein-json" }
 stein-tls = { path = "crates/stein-tls" }
 stein-io = { path = "crates/stein-io" }
 stein-dbus = { path = "crates/stein-dbus" }
+stein-layout = { path = "crates/stein-layout" }
+stein-ui = { path = "crates/stein-ui" }
+stein-widgets = { path = "crates/stein-widgets" }
+stein-dock = { path = "crates/stein-dock" }
+stein-menu = { path = "crates/stein-menu" }
+stein-text = { path = "crates/stein-text" }
+stein-theme = { path = "crates/stein-theme" }
+stein-ini = { path = "crates/stein-ini" }
+stein-shell = { path = "crates/stein-shell" }
+stein-gpu = { path = "crates/stein-gpu" }
 httparse = "1"
 fearless_simd = "1.0"
 

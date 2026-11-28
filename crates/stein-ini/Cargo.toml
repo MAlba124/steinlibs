@@ -1,0 +1,10 @@
+[package]
+name = "stein-ini"
+version.workspace = true
+edition.workspace = true
+description = "INI configuration parsing. no_std, no alloc, spans into the caller's bytes."
+
+[dependencies]
+
+[lints]
+workspace = true

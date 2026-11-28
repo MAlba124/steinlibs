@@ -1,0 +1,11 @@
+[package]
+name = "stein-theme"
+version.workspace = true
+edition.workspace = true
+description = "One palette for every stein app: a few seed colours, everything else derived, any of it overridable from a file."
+
+[dependencies]
+stein-ini.workspace = true
+
+[lints]
+workspace = true

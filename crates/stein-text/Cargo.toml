@@ -1,0 +1,21 @@
+[package]
+name = "stein-text"
+version.workspace = true
+edition.workspace = true
+description = "Glyph rasterization and atlas packing. Produces tables of positioned glyphs; knows nothing about layout or platform."
+
+[dependencies]
+skrifa = "0.46"
+# HarfBuzz port on read-fonts, the parser skrifa already uses. Shaping for
+# proportional text. Versions move in lockstep with skrifa via read-fonts.
+harfrust = "0.13"
+
+[dev-dependencies]
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "text"
+harness = false
+
+[lints]
+workspace = true

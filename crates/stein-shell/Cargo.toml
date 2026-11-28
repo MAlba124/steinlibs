@@ -1,0 +1,53 @@
+[package]
+name = "stein-shell"
+version.workspace = true
+edition.workspace = true
+description = "Window, input and software painting. The platform layer any stein app runs on."
+
+# Mapping shm memory needs unsafe, so this does not take the workspace's
+# unsafe_code = forbid. Everything else applies.
+[dependencies]
+stein-ui.workspace = true
+stein-layout.workspace = true
+# "system" pulls wayland-backend/client_system so we drive real libwayland
+# objects, which Vulkan WSI will later need.
+#
+# Deliberately NOT "dlopen". Loading libwayland at runtime sounds friendlier,
+# but it defers a link error into a confusing runtime one, and on a system with
+# no ldconfig cache (NixOS) the library is simply never found: the binary runs,
+# parses the capture, then dies with "the wayland library could not be loaded".
+# Linking it instead bakes an RPATH at build time, which is how every other
+# Wayland application on such a system works. The cost is needing pkg-config
+# and the wayland development files to build, which the dev shell provides.
+wayland-client = { version = "0.31.15", features = ["system"] }
+# cursor-shape-v1 is how a client sets a pointer shape without loading a
+# cursor theme and scaling its images. It needs both gates: it lives in
+# staging, and it references the unstable tablet protocol.
+wayland-protocols = { version = "0.32.13", features = ["client", "staging", "unstable"] }
+# zwlr_layer_shell_v1, what bars and launchers sit on.
+wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
+rustix = { version = "1.1.5", features = ["fs", "event", "pipe"] }
+memmap2 = "0.9.11"
+# wl_keyboard hands back evdev scancodes and a keymap fd, nothing more. Turning
+# those into keysyms and text is layout, modifier and dead-key handling, which
+# is exactly what this library exists for and is not worth reimplementing.
+xkbcommon = "0.9"
+# The GPU painter behind STEIN_GPU, with the software painter as fallback.
+stein-gpu.workspace = true
+# The glyph blend runs in 16-bit lanes. Safe at the surface, so it needs no
+# widening of the unsafe island above.
+fearless_simd.workspace = true
+
+[dev-dependencies]
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "paint"
+harness = false
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+todo = "deny"
+unimplemented = "deny"
+excessive_nesting = "warn"

@@ -1,0 +1,19 @@
+[package]
+name = "stein-ui"
+version.workspace = true
+edition.workspace = true
+description = "Immediate-mode API over retained tables. Keyed boxes, persistent state, input routing, a draw list. no_std, no alloc."
+
+[dependencies]
+stein-core.workspace = true
+stein-layout.workspace = true
+
+[dev-dependencies]
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "ui"
+harness = false
+
+[lints]
+workspace = true

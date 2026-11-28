@@ -1,0 +1,40 @@
+[package]
+name = "stein-gpu"
+version.workspace = true
+edition.workspace = true
+description = "GPU layer in the No Graphics API style. Pointers, one bindless texture table, global barriers."
+
+[dependencies]
+# Vulkan entry points, linked against the flake's vulkan-loader
+# (libvulkan.so.1) rather than dlopened, for the same reason stein-shell
+# links libwayland. Headers are 1.3.281, which covers the whole floor.
+ash = { version = "0.38.0", default-features = false, features = ["linked", "debug", "std"] }
+
+# dlopen of the one Vulkan driver a device needs, handed to the loader
+# through VK_LUNARG_direct_driver_loading so it does not load them all.
+libloading = "0.8.9"
+
+# Surfaces are made from wayland-client's own types, so the raw pointers
+# Vulkan needs come from objects this crate keeps alive. Same version and
+# "system" feature as stein-shell, so one libwayland binding.
+wayland-client = { version = "0.31.15", features = ["system"] }
+
+[dev-dependencies]
+# Counting allocator for the zero allocation test.
+stein-arena.workspace = true
+
+# The one unsafe island is src/vk. `deny` rather than the workspace's
+# `forbid` so lib.rs can allow it on that module alone, every other module
+# stays unsafe free.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+too_many_lines = "deny"
+excessive_nesting = "warn"

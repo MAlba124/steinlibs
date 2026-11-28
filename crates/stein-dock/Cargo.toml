@@ -1,0 +1,13 @@
+[package]
+name = "stein-dock"
+version.workspace = true
+edition.workspace = true
+description = "Docking workspace on stein-ui: panels, tab groups, resizable splits, drag to re-dock, persistence."
+
+[dependencies]
+stein-theme.workspace = true
+stein-ui.workspace = true
+stein-layout.workspace = true
+
+[lints]
+workspace = true

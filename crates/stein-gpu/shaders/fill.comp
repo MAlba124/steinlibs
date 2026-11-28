@@ -1,0 +1,30 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+
+// Test kernel for the pointer model. The root is one pointer to a params
+// struct in the ring, which points at the output. Nothing is bound.
+
+layout(local_size_x = 64) in;
+
+layout(buffer_reference, std430, buffer_reference_align = 4) writeonly buffer Words {
+    uint w[];
+};
+
+// Mirrors the test's Params, 16 bytes.
+layout(buffer_reference, std430, buffer_reference_align = 8) readonly buffer Params {
+    Words out_words;
+    uint count;
+    uint add;
+};
+
+layout(push_constant, std430) uniform Root {
+    Params params;
+} root;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    Params p = root.params;
+    if (i < p.count) {
+        p.out_words.w[i] = i * 3u + p.add;
+    }
+}

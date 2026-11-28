@@ -1,0 +1,13 @@
+[package]
+name = "stein-menu"
+version.workspace = true
+edition.workspace = true
+description = "Context menus as plain data: levels of rows, a cursor, placement and the moves between them. Painted through a callback, no alloc."
+
+[dependencies]
+stein-layout.workspace = true
+stein-ui.workspace = true
+stein-theme.workspace = true
+
+[lints]
+workspace = true

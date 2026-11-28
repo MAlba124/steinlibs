@@ -1,0 +1,13 @@
+[package]
+name = "stein-widgets"
+version.workspace = true
+edition.workspace = true
+description = "Widgets built only on stein-ui's public API: scroll areas, virtualized lists, splitters, tabs."
+
+[dependencies]
+stein-theme.workspace = true
+stein-ui.workspace = true
+stein-layout.workspace = true
+
+[lints]
+workspace = true
