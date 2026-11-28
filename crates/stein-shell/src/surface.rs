@@ -111,6 +111,8 @@ pub(crate) struct Surf {
     pub(crate) swap: Option<stein_gpu::Surface>,
     /// Events since this surface's last build.
     pub(crate) input: Input,
+    /// When it last built, for the frame's dt.
+    pub(crate) built_at: Option<Instant>,
     /// What a toplevel was last told it is called.
     title: String,
     /// When a GPU surface's size last changed, while it still paints in
@@ -228,6 +230,7 @@ fn create(
         shm: [Shm::default(), Shm::default()],
         swap: None,
         input: Input::default(),
+        built_at: None,
         title: String::new(),
         resized_at: None,
         bridged: false,

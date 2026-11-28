@@ -80,13 +80,26 @@ fn pointed(shell: &mut Shell) -> Option<&mut Input> {
         .map(|s| &mut s.input)
 }
 
+/// Longest step one frame may take. A window that slept for a minute wakes
+/// with this, so an animation resumes rather than jumping to its end.
+const MAX_DT: f32 = 0.1;
+
+/// Seconds since `last`, which becomes `now`. Wall time, so an animation
+/// keeps its speed whether frames come at the display's rate or as fast as a
+/// resize drives them. The first frame gets one 60th of a second.
+pub(crate) fn frame_dt(last: &mut Option<std::time::Instant>, now: std::time::Instant) -> f32 {
+    let dt = last.map_or(1.0 / 60.0, |t| now.saturating_duration_since(t).as_secs_f32());
+    *last = Some(now);
+    dt.clamp(0.0, MAX_DT)
+}
+
 /// One surface's input for its build: what arrived for it, the pointer if
 /// it is over this one, and the shared modifier state.
 pub(crate) fn take_input(shell: &mut Shell, i: usize) -> Input {
     let key = shell.surfs[i].key;
     let mut input = core::mem::take(&mut shell.surfs[i].input);
     input.mods = shell.mods;
-    input.dt = 1.0 / 60.0;
+    input.dt = frame_dt(&mut shell.surfs[i].built_at, std::time::Instant::now());
     input.focused = shell.kbd_key == Some(key);
     if shell.ptr_key == Some(key) {
         input.pointer = [shell.pointer_x as f32, shell.pointer_y as f32];
@@ -421,6 +434,7 @@ fn pointer_left(shell: &mut Shell) {
     shell.ptr_key = None;
     // The serial only names this surface, and the pointer has gone.
     shell.cursor_serial = 0;
+    shell.cursor_shape = None;
     wake(shell);
 }
 
@@ -546,7 +560,7 @@ fn key_event(shell: &mut Shell, key: u32, state: WEnum<wl_keyboard::KeyState>) {
 /// Cheap to call every frame: it returns immediately unless the shape actually
 /// changed, so the common case costs a comparison and no request.
 pub(crate) fn apply_cursor(shell: &mut Shell, qh: &QueueHandle<Shell>, want: Cursor) {
-    if shell.cursor_shape == want || shell.ptr_key.is_none() || shell.cursor_serial == 0 {
+    if shell.cursor_shape == Some(want) || shell.ptr_key.is_none() || shell.cursor_serial == 0 {
         return;
     }
     let serial = shell.cursor_serial;
@@ -554,7 +568,7 @@ pub(crate) fn apply_cursor(shell: &mut Shell, qh: &QueueHandle<Shell>, want: Cur
         // Hidden is a null cursor surface, which needs no shape device.
         if let Some(p) = shell.pointer.as_ref() {
             p.set_cursor(serial, None, 0, 0);
-            shell.cursor_shape = want;
+            shell.cursor_shape = Some(want);
         }
         return;
     };
@@ -565,7 +579,7 @@ pub(crate) fn apply_cursor(shell: &mut Shell, qh: &QueueHandle<Shell>, want: Cur
         return;
     };
     device.set_shape(serial, shape);
-    shell.cursor_shape = want;
+    shell.cursor_shape = Some(want);
 }
 
 /// The shape device, made on first use.
@@ -651,8 +665,9 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Shell {
                 shell.cursor_serial = serial;
                 // The compositor hands the pointer over with whatever shape it
                 // was last using, a resize arrow after dragging an edge for
-                // instance. Saying nothing here is what leaves it there.
-                shell.cursor_shape = Cursor::Default;
+                // instance. Saying nothing here is what leaves it there, so
+                // no shape counts as set until one is sent for this enter.
+                shell.cursor_shape = None;
                 if let Some(key) = shell.ptr_key {
                     let want = cursor_for(shell, key);
                     apply_cursor(shell, qh, want);
@@ -1157,5 +1172,25 @@ mod repeat_tests {
         assert!(interval(5000) >= Duration::from_millis(1));
         assert_eq!(interval(25), Duration::from_millis(40));
         assert_eq!(interval(1000), Duration::from_millis(1));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_DT, frame_dt};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn dt_is_wall_time_between_builds_however_fast_they_come() {
+        let start = Instant::now();
+        let mut last = None;
+        assert_eq!(frame_dt(&mut last, start), 1.0 / 60.0, "the first frame");
+        // A resize builds far faster than the display refreshes.
+        let quick = frame_dt(&mut last, start + Duration::from_millis(2));
+        assert!((quick - 0.002).abs() < 1e-4, "{quick}");
+        let slept = frame_dt(&mut last, start + Duration::from_secs(60));
+        assert_eq!(slept, MAX_DT, "a long sleep is one capped step");
+        let back = frame_dt(&mut last, start + Duration::from_secs(59));
+        assert_eq!(back, 0.0, "a clock that steps back is no time");
     }
 }

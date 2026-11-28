@@ -172,7 +172,8 @@ pub(crate) struct Shell {
     /// so a motion or button serial is refused.
     pub(crate) cursor_serial: u32,
     /// What was last asked for, so an unchanged shape costs no requests.
-    pub(crate) cursor_shape: Cursor,
+    /// `None` after an enter, when the compositor's own shape is showing.
+    pub(crate) cursor_shape: Option<Cursor>,
     /// The surface under the pointer and the one with keyboard focus.
     pub(crate) ptr_key: Option<u32>,
     pub(crate) kbd_key: Option<u32>,
@@ -235,7 +236,7 @@ impl Shell {
             locked: None,
             lock_active: false,
             cursor_serial: 0,
-            cursor_shape: Cursor::Default,
+            cursor_shape: None,
             ptr_key: None,
             kbd_key: None,
             pointer_x: -1.0,
