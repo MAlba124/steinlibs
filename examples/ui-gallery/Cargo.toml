@@ -1,0 +1,26 @@
+[package]
+name = "ui-gallery"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Every part of the stein UI stack on one window: shapes, text, input, motion and lists."
+publish = false
+
+[dependencies]
+stein-arena.workspace = true
+stein-layout.workspace = true
+stein-shell.workspace = true
+stein-text.workspace = true
+stein-ui.workspace = true
+stein-widgets.workspace = true
+
+[[bin]]
+name = "ui-gallery"
+path = "src/main.rs"
+
+[lib]
+name = "ui_gallery"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
