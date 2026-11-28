@@ -237,6 +237,9 @@ pub struct Options {
     /// persistent state and layout is stateless.
     pub scroll: [f32; 2],
     pub placement: Placement,
+    /// Invisible to [`BoxTable::hit`], so the pointer reaches the box under
+    /// it. For labels and decoration inside something clickable.
+    pub passive: bool,
 }
 
 /// Space a container holds back from its children.
@@ -284,6 +287,7 @@ const DEFAULT_OPTS: Options = Options {
     clip: false,
     scroll: [0.0, 0.0],
     placement: Placement::Flow,
+    passive: false,
 };
 
 impl BoxSpec {
@@ -315,6 +319,11 @@ impl BoxSpec {
     /// Main-axis distribution of leftover space.
     pub const fn justify(mut self, a: Align) -> Self {
         self.opts.justify = a;
+        self
+    }
+    /// Let the pointer through to whatever is under this box.
+    pub const fn passive(mut self) -> Self {
+        self.opts.passive = true;
         self
     }
     /// Confine this subtree to this box's rect.
@@ -567,7 +576,7 @@ impl<'a> BoxTable<'a> {
         let n = self.len as usize;
         (0..n)
             .rev()
-            .find(|&i| self.s.rect[i].contains(p) && self.s.clip[i].contains(p))
+            .find(|&i| !self.s.opts[i].passive && self.s.rect[i].contains(p) && self.s.clip[i].contains(p))
             .map(|i| self.s.key[i])
     }
 

@@ -571,6 +571,18 @@ fn hit_testing_prefers_the_last_painted() {
 }
 
 #[test]
+fn a_passive_box_lets_the_pointer_through_to_the_one_under_it() {
+    table!(t, 8);
+    let square = |spec: BoxSpec| spec.w(SizeSpec::px(100.0)).h(SizeSpec::px(100.0));
+    t.open(10, square(BoxSpec::container(Axis::X))).expect("fits");
+    t.leaf(20, square(BoxSpec::leaf()).passive()).expect("fits");
+    t.close().expect("balanced");
+    t.leaf(30, square(BoxSpec::leaf().floating([0.0, 0.0])).passive()).expect("fits");
+    t.solve([100.0, 100.0]).expect("closed");
+    assert_eq!(t.hit([50.0, 50.0]), Some(10), "both passive boxes are skipped");
+}
+
+#[test]
 fn rects_come_out_in_painter_order() {
     table!(t, 8);
     t.open(
