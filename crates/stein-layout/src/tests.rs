@@ -991,6 +991,30 @@ fn floating_escapes_an_ancestors_clip() {
 }
 
 #[test]
+fn an_absolute_box_is_placed_like_a_floating_one_but_stays_clipped() {
+    table!(t, 8);
+    let clipper = BoxSpec::container(Axis::Y)
+        .w(SizeSpec::px(100.0))
+        .h(SizeSpec::children_sum())
+        .pad(10.0)
+        .clip();
+    t.open(0, clipper).expect("fits");
+    t.leaf(1, BoxSpec::leaf().w(SizeSpec::px(40.0)).h(SizeSpec::px(30.0))).expect("fits");
+    let over = BoxSpec::leaf().w(SizeSpec::px(200.0)).h(SizeSpec::px(200.0));
+    t.leaf(2, over.absolute([5.0, 7.0])).expect("fits");
+    t.leaf(3, BoxSpec::leaf().w(SizeSpec::px(40.0)).h(SizeSpec::px(30.0))).expect("fits");
+    t.close().expect("balanced");
+    t.solve([400.0, 400.0]).expect("closed");
+
+    let parent = t.rect(0).expect("live");
+    assert_eq!(parent.height(), 80.0, "out of the parent's sum");
+    assert_eq!(t.rect(3).expect("live").min[1], 40.0, "the flow carries on past it");
+    let placed = t.rect(2).expect("live");
+    assert_eq!(placed.min, [15.0, 17.0], "at the offset from the content origin");
+    assert_eq!(t.clip(2).expect("live"), parent, "clipped by its ancestor");
+}
+
+#[test]
 fn nested_clips_intersect() {
     table!(t, 8);
     t.open(

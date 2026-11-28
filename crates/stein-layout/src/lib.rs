@@ -218,6 +218,22 @@ pub enum Placement {
     ///
     /// Paint order is still emission order, so overlays must be emitted late.
     Floating([f32; 2]),
+    /// Positioned and sized like [`Placement::Floating`], but clipped by its
+    /// ancestors like a box in the flow. Decoration laid over a widget, a
+    /// switch's knob or a badge on a card, that has to scroll away with it.
+    Absolute([f32; 2]),
+}
+
+impl Placement {
+    /// Where it sits against the parent's content origin, for a box out of
+    /// the flow.
+    #[inline]
+    fn offset(self) -> Option<[f32; 2]> {
+        match self {
+            Placement::Flow => None,
+            Placement::Floating(at) | Placement::Absolute(at) => Some(at),
+        }
+    }
 }
 
 /// Per-box options that do not affect sizing, only placement and visibility.
@@ -341,6 +357,12 @@ impl BoxSpec {
     /// parent's content origin.
     pub const fn floating(mut self, offset: [f32; 2]) -> Self {
         self.opts.placement = Placement::Floating(offset);
+        self
+    }
+    /// Place this box at `offset` from the parent's content origin, out of the
+    /// flow, still clipped by its ancestors.
+    pub const fn absolute(mut self, offset: [f32; 2]) -> Self {
+        self.opts.placement = Placement::Absolute(offset);
         self
     }
     /// Equal padding on all four sides.
@@ -611,11 +633,11 @@ impl<'a> BoxTable<'a> {
         p != NO_PARENT && matches!(self.s.size[p as usize][a].kind, Size::ChildrenSum)
     }
 
-    /// Children the parent does not account for: floating boxes, which are placed
-    /// by hand, and the fraction-of-a-sum-parent cycle above.
+    /// Children the parent does not account for: floating and absolute boxes,
+    /// which are placed by hand, and the fraction-of-a-sum-parent cycle above.
     #[inline]
     fn out_of_flow(&self, c: usize, a: usize) -> bool {
-        matches!(self.s.opts[c].placement, Placement::Floating(_)) || self.excluded_from_sum(c, a)
+        self.s.opts[c].placement.offset().is_some() || self.excluded_from_sum(c, a)
     }
 
     #[inline]
@@ -976,7 +998,7 @@ impl<'a> BoxTable<'a> {
             while c < end {
                 let cu = c as usize;
                 let extent = self.s.computed[cu][a];
-                if let Placement::Floating(offset) = self.s.opts[cu].placement {
+                if let Some(offset) = self.s.opts[cu].placement.offset() {
                     // Placed by hand against the content origin, and it does not
                     // move the cursor for whoever comes next.
                     self.s.rect[cu].min[a] = content_origin + offset[a];
