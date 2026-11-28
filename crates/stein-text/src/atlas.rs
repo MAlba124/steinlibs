@@ -605,11 +605,29 @@ impl<'a> MonoAtlas<'a> {
         origin: [f32; 2],
         out: &mut Vec<PositionedGlyph>,
     ) -> Result<(), TextError> {
+        self.place_sized(0, run, origin, out)
+    }
+
+    /// As [`MonoAtlas::place`], for a run shaped at size `size` from
+    /// [`MonoAtlas::add_size`]. The baseline is that size's.
+    pub fn place_sized(
+        &mut self,
+        size: u8,
+        run: &[ShapedGlyph],
+        origin: [f32; 2],
+        out: &mut Vec<PositionedGlyph>,
+    ) -> Result<(), TextError> {
         let atlas = [self.config.width as f32, self.config.height as f32];
-        let baseline = origin[1] + self.ascent;
+        let ascent = self
+            .sizes
+            .get(usize::from(size))
+            .ok_or(TextError::InvalidFont)?
+            .cell
+            .baseline;
+        let baseline = origin[1] + ascent;
         let mut pen_x = origin[0];
         for g in run {
-            let e = self.glyph_in(usize::from(g.face), GlyphId::new(g.glyph_id))?;
+            let e = self.glyph_at(size, usize::from(g.face), GlyphId::new(g.glyph_id))?;
             let pen = [
                 (pen_x + g.x_offset).round(),
                 (baseline - g.y_offset).round(),

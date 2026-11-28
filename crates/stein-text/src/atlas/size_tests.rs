@@ -187,3 +187,29 @@ fn a_face_kept_at_its_width_is_not_squeezed() {
     let (w0, w1) = (wide(&mut plain), wide(&mut kept));
     assert_eq!((w0.w, w0.h, w0.left), (w1.w, w1.h, w1.left));
 }
+
+#[test]
+fn a_run_shaped_at_a_size_places_at_that_size() {
+    let Some(font) = test_font::load() else {
+        return;
+    };
+    let mut a = atlas(&font);
+    let big = a.add_size(28.0).expect("size");
+    let mut run = Vec::new();
+    crate::Shaper::new(&font, 14.0).expect("shaper").shape("Hm", &mut run);
+    let mut small = Vec::new();
+    a.place(&run, [0.0, 0.0], &mut small).expect("place");
+    let mut same = Vec::new();
+    a.place_sized(0, &run, [0.0, 0.0], &mut same).expect("place");
+    assert_eq!(small, same, "size 0 is what place draws");
+
+    crate::Shaper::new(&font, 28.0).expect("shaper").shape("Hm", &mut run);
+    let mut large = Vec::new();
+    a.place_sized(big, &run, [0.0, 0.0], &mut large).expect("place");
+    let height = |g: &[PositionedGlyph]| g[0].dst[3];
+    let ratio = height(&large) / height(&small);
+    assert!((1.8..=2.2).contains(&ratio), "glyph height ratio {ratio}");
+    let baseline = |g: &[PositionedGlyph]| g[0].dst[1] + g[0].dst[3];
+    assert!(baseline(&large) > baseline(&small), "the bigger size sits lower");
+    assert!(a.place_sized(9, &run, [0.0, 0.0], &mut large).is_err(), "unknown size");
+}
