@@ -14,6 +14,7 @@ extern crate std;
 
 mod util;
 
+pub mod field;
 pub mod scroll;
 pub mod split;
 pub mod table;
@@ -21,6 +22,7 @@ pub mod tabs;
 pub mod textview;
 pub mod vlist;
 
+pub use field::{Cursor, Edit, Field, FieldStyle, field};
 pub use scroll::{ScrollArea, ScrollStyle};
 pub use split::{Splitter, SplitterStyle};
 pub use table::{Column, ColumnWidth, MAX_COLUMNS, Sort, Table, TableStyle};
@@ -50,6 +52,12 @@ pub enum WidgetError {
     NoRowOpen,
     /// A zero or negative line height or character advance.
     TextMetricsNotPositive,
+    /// A text field with a zero or negative height.
+    FieldHeightNotPositive,
+    /// A negative border width, pad or radius on a text field.
+    FieldInsetNegative,
+    /// A text field's length past its buffer's capacity.
+    FieldLengthOutOfRange,
 }
 
 impl From<UiError> for WidgetError {
