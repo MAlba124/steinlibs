@@ -36,6 +36,56 @@ pub struct Quad {
     pub uv: [f32; 4],
     /// `uv` is in the image atlas rather than the coverage atlas.
     pub image: bool,
+    /// Rounded corners and stroke. [`Shape::NONE`] is a plain rect, which keeps
+    /// the exact pixel snapping solid quads always had. Glyphs ignore it.
+    pub shape: Shape,
+}
+
+/// The outline of a solid or image quad.
+///
+/// Radii are whole pixels per corner, top left, top right, bottom right,
+/// bottom left. Each one is clamped to half the shorter side when painted, so
+/// 255 makes a pill or a circle of anything up to 510 pixels. A nonzero
+/// `stroke` paints only a ring that wide just inside the outline, its inner
+/// corners rounded by the radius less the stroke. Any shape other than
+/// [`Shape::NONE`] is antialiased on every edge.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Shape {
+    pub radius: [u8; 4],
+    pub stroke: u8,
+}
+
+impl Shape {
+    pub const NONE: Shape = Shape {
+        radius: [0; 4],
+        stroke: 0,
+    };
+
+    /// The same radius on every corner.
+    pub const fn round(radius: u8) -> Shape {
+        Shape {
+            radius: [radius; 4],
+            stroke: 0,
+        }
+    }
+
+    /// As round as the quad allows, a pill or a circle.
+    pub const PILL: Shape = Shape::round(u8::MAX);
+
+    pub const fn corners(radius: [u8; 4]) -> Shape {
+        Shape { radius, stroke: 0 }
+    }
+
+    /// Only the ring `width` wide inside the outline.
+    pub const fn stroked(mut self, width: u8) -> Shape {
+        self.stroke = width;
+        self
+    }
+
+    #[inline]
+    pub const fn is_none(&self) -> bool {
+        self.stroke == 0 && u32::from_le_bytes(self.radius) == 0
+    }
 }
 
 impl Quad {
@@ -46,6 +96,7 @@ impl Quad {
             color,
             uv: [0.0; 4],
             image: false,
+            shape: Shape::NONE,
         }
     }
 
@@ -58,6 +109,7 @@ impl Quad {
             color,
             uv,
             image: false,
+            shape: Shape::NONE,
         }
     }
 
@@ -70,7 +122,15 @@ impl Quad {
             color,
             uv,
             image: true,
+            shape: Shape::NONE,
         }
+    }
+
+    /// The same quad with `shape` as its outline.
+    #[inline]
+    pub const fn shaped(mut self, shape: Shape) -> Self {
+        self.shape = shape;
+        self
     }
 
     /// Samples the coverage atlas, a glyph.

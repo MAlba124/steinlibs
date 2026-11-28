@@ -36,6 +36,7 @@ mod lock;
 pub mod multi;
 pub mod paint;
 mod plan;
+mod round;
 pub mod scene;
 mod selection;
 mod shell;

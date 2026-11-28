@@ -40,6 +40,8 @@ fn gpu_quad_matches_the_shader_layout() {
         color: 0x80FF_2010,
         slot: TextureSlot(7),
         kind: QuadKind::Coverage,
+        radius: [1, 2, 3, 4],
+        stroke: 5,
     };
     let b = stored(&q);
     assert_eq!(b.len(), 64);
@@ -50,8 +52,8 @@ fn gpu_quad_matches_the_shader_layout() {
     assert_eq!(f32_at(&b, 44), 0.0625);
     assert_eq!(u32_at(&b, 48), 0x80FF_2010);
     assert_eq!(u32_at(&b, 52), 7);
-    assert_eq!(u32_at(&b, 56), 1);
-    assert_eq!(u32_at(&b, 60), 0, "padding is written, never left stale");
+    assert_eq!(u32_at(&b, 56), 1 | 5 << 8, "kind, then stroke");
+    assert_eq!(u32_at(&b, 60), 0x0403_0201, "radii, top left lowest");
 }
 
 #[test]

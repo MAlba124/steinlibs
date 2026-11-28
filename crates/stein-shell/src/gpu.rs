@@ -590,6 +590,8 @@ pub fn gpu_quad(q: &Quad) -> GpuQuad {
         } else {
             QuadKind::Solid
         },
+        radius: q.shape.radius,
+        stroke: q.shape.stroke,
     }
 }
 

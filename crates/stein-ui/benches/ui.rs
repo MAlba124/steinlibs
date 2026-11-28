@@ -41,6 +41,7 @@ struct Backing {
     custom: Vec<CustomRegion>,
     kstack: Vec<u64>,
     fill: Vec<u32>,
+    shape: Vec<stein_ui::draw::Shape>,
 }
 
 impl Backing {
@@ -73,6 +74,7 @@ impl Backing {
             custom: vec![region; 8],
             kstack: vec![0; 32],
             fill: vec![0; boxes],
+            shape: vec![stein_ui::draw::Shape::NONE; boxes],
         }
     }
 
@@ -101,6 +103,7 @@ impl Backing {
             custom: &mut self.custom,
             key_stack: &mut self.kstack,
             fill: &mut self.fill,
+            shape: &mut self.shape,
         }
     }
 }

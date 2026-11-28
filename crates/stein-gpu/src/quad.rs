@@ -9,7 +9,10 @@
 //! the shader, so per quad scissoring costs nothing and needs no state
 //! changes. The fragment shader (shaders/quad.frag) picks by `kind`: flat
 //! colour, coverage bytes from the atlas behind [`QuadRoot::atlas`] times
-//! colour, or an RGBA image from the texture table.
+//! colour, or an RGBA image from the texture table. A solid or image quad
+//! with a `radius` or `stroke` is shaped: its coverage is the distance of
+//! each pixel centre from a rounded outline, stein-shell's round.rs to the
+//! arithmetic.
 //!
 //! Solid and coverage quads reproduce stein-shell's software painter to the
 //! pixel, so a frame can move between the two backends unseen:
@@ -60,8 +63,8 @@ pub enum QuadKind {
 /// 32 uv     u v w h, normalised
 /// 48 color  ARGB, top byte alpha
 /// 52 slot   texture table index
-/// 56 kind   QuadKind
-/// 60 pad
+/// 56 kind   QuadKind in the low byte, stroke in the next
+/// 60 radius corners as bytes, top left lowest
 /// ```
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct GpuQuad {
@@ -71,6 +74,10 @@ pub struct GpuQuad {
     pub color: u32,
     pub slot: TextureSlot,
     pub kind: QuadKind,
+    /// Corner radii in pixels, top left, top right, bottom right, bottom left.
+    pub radius: [u8; 4],
+    /// Ring width in pixels, 0 for a filled shape.
+    pub stroke: u8,
 }
 
 impl GpuLayout for GpuQuad {
@@ -83,8 +90,8 @@ impl GpuLayout for GpuQuad {
         self.uv.store(out.get_mut(32..48).unwrap_or(&mut []));
         put(out, 48, &self.color.to_le_bytes());
         put(out, 52, &self.slot.0.to_le_bytes());
-        put(out, 56, &(self.kind as u32).to_le_bytes());
-        put(out, 60, &[0; 4]);
+        put(out, 56, &(self.kind as u32 | u32::from(self.stroke) << 8).to_le_bytes());
+        put(out, 60, &self.radius);
     }
 }
 

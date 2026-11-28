@@ -58,7 +58,7 @@ extern crate std;
 pub mod draw;
 pub mod key;
 
-use draw::{CustomRegion, Damage, DrawList, Quad};
+use draw::{CustomRegion, Damage, DrawList, Quad, Shape};
 use stein_core::keyed::{KeyedError, KeyedStore};
 use stein_layout::{BoxSpec, BoxTable, LayoutError, LayoutStorage, Rect};
 
@@ -395,6 +395,9 @@ pub struct UiStorage<'a> {
     pub key_stack: &'a mut [u64],
     /// Fill colour per box, parallel to emission order.
     pub fill: &'a mut [u32],
+    /// Outline per box, parallel to `fill`. Shorter than the box table leaves
+    /// the boxes past its end plain.
+    pub shape: &'a mut [Shape],
 }
 
 /// What `end_frame` concluded.
@@ -430,6 +433,9 @@ pub struct Ui<'a> {
     custom_box: [u32; MAX_CUSTOM_TRACKED],
     key_stack: &'a mut [u64],
     fill: &'a mut [u32],
+    shape: &'a mut [Shape],
+    /// The box emitted last, which [`Ui::shape`] applies to.
+    last_box: u32,
     depth: u32,
     frame: u32,
     input: Input,
@@ -484,6 +490,8 @@ impl<'a> Ui<'a> {
             custom_box: [0; MAX_CUSTOM_TRACKED],
             key_stack: s.key_stack,
             fill: s.fill,
+            shape: s.shape,
+            last_box: u32::MAX,
             depth: 0,
             frame: 0,
             input: Input::default(),
@@ -563,6 +571,7 @@ impl<'a> Ui<'a> {
         self.draw.clear();
         self.custom_len = 0;
         self.depth = 0;
+        self.last_box = u32::MAX;
         self.focusable_count = 0;
         self.focus_moved = false;
     }
@@ -722,6 +731,19 @@ impl<'a> Ui<'a> {
     fn record(&mut self, i: u32, fill: u32) {
         if let Some(slot) = self.fill.get_mut(i as usize) {
             *slot = fill;
+        }
+        if let Some(slot) = self.shape.get_mut(i as usize) {
+            *slot = Shape::NONE;
+        }
+        self.last_box = i;
+    }
+
+    /// Give the box emitted last a rounded or stroked outline. Its fill paints
+    /// in that shape. Does nothing before the first box of a frame, or when the
+    /// shape table is shorter than the box table.
+    pub fn shape(&mut self, shape: Shape) {
+        if let Some(slot) = self.shape.get_mut(self.last_box as usize) {
+            *slot = shape;
         }
     }
 
@@ -932,7 +954,8 @@ impl<'a> Ui<'a> {
             let (Some(rect), Some(clip)) = (self.boxes.rect(i), self.boxes.clip(i)) else {
                 continue;
             };
-            self.draw.push(Quad::solid(rect, clip, fill));
+            let shape = self.shape.get(i as usize).copied().unwrap_or(Shape::NONE);
+            self.draw.push(Quad::solid(rect, clip, fill).shaped(shape));
         }
     }
 

@@ -1,6 +1,7 @@
 //! The frame lifecycle, input routing and damage, all headless.
 
 use super::*;
+use crate::draw::Shape;
 use stein_layout::{Axis, Insets, Options, SizeSpec};
 
 const N: usize = 64;
@@ -34,6 +35,7 @@ macro_rules! ui {
         }; 8];
         let mut kstack = [0u64; N];
         let mut fill = [0u32; N];
+        let mut shape = [crate::draw::Shape::NONE; N];
         let storage = UiStorage {
             layout: LayoutStorage {
                 key: &mut lkey,
@@ -58,6 +60,7 @@ macro_rules! ui {
             custom: &mut custom,
             key_stack: &mut kstack,
             fill: &mut fill,
+            shape: &mut shape,
         };
         #[allow(unused_mut)]
         let mut $u = Ui::new(storage).expect("storage agrees");
@@ -103,6 +106,53 @@ fn a_frame_produces_quads_for_filled_boxes_only() {
     assert_eq!(u.quads().len(), 1);
     assert_eq!(u.quads()[0].color, RED);
     assert_eq!(u.box_count(), 2);
+}
+
+#[test]
+fn a_shape_applies_to_the_box_emitted_last_and_only_this_frame() {
+    ui!(u);
+    let shapes = |u: &mut Ui<'_>, shaped: bool| {
+        u.begin_frame(at(-1.0, -1.0, false), [400.0, 300.0]);
+        // Before any box there is nothing to shape.
+        u.shape(Shape::round(9));
+        u.open(1, panel(), BLUE).expect("fits");
+        u.leaf(2, button(), RED).expect("fits");
+        if shaped {
+            u.shape(Shape::round(6).stroked(1));
+        }
+        u.leaf(3, button(), RED).expect("fits");
+        u.close().expect("balanced");
+        u.end_frame().expect("closed");
+        u.finish();
+        assert_eq!(u.quads().len(), 3);
+        let mut out = [Shape::PILL; 3];
+        for (o, q) in out.iter_mut().zip(u.quads()) {
+            *o = q.shape;
+        }
+        out
+    };
+    let round = Shape::round(6).stroked(1);
+    assert_eq!(shapes(&mut u, true), [Shape::NONE, round, Shape::NONE]);
+    assert_eq!(
+        shapes(&mut u, false),
+        [Shape::NONE; 3],
+        "the table is rewritten every frame, nothing carries over"
+    );
+}
+
+#[test]
+fn a_changed_shape_is_damage() {
+    ui!(u);
+    let draw = |u: &mut Ui<'_>, shape: Shape| {
+        u.begin_frame(at(-1.0, -1.0, false), [400.0, 300.0]);
+        u.leaf(1, button(), RED).expect("fits");
+        u.shape(shape);
+        u.end_frame().expect("closed");
+        u.finish()
+    };
+    draw(&mut u, Shape::round(4));
+    assert!(!draw(&mut u, Shape::round(4)).needs_present);
+    assert!(draw(&mut u, Shape::round(5)).needs_present);
 }
 
 #[test]

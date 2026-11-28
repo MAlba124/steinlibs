@@ -8,7 +8,7 @@ use stein_layout::Rect;
 use stein_shell::Blend;
 use stein_shell::gpu::{GpuPaint, PaintError};
 use stein_shell::paint::{Atlas, Backdrop, Images, paint_regions, paint_regions_on};
-use stein_ui::draw::Quad;
+use stein_ui::draw::{Quad, Shape};
 
 fn adapter() -> Adapter {
     match std::env::var("STEIN_GPU_ADAPTER")
@@ -110,7 +110,22 @@ fn solid(rng: &mut Rng, w: f32, h: f32) -> Quad {
     Quad::solid(rect(x, y, size[0], size[1]), clip(rng, w, h), color)
 }
 
-/// A frame of glyphs and fills in random order over a random atlas.
+/// A fill with random corners, sometimes a ring.
+fn shaped(rng: &mut Rng, w: f32, h: f32) -> Quad {
+    let radius = [0, 1, 2, 3].map(|_| (rng.next() % 32) as u8);
+    let stroke = match rng.next() % 3 {
+        0 => (rng.next() % 5 + 1) as u8,
+        _ => 0,
+    };
+    let mut q = solid(rng, w, h).shaped(Shape { radius, stroke });
+    if q.shape.is_none() {
+        q.shape = Shape::PILL;
+    }
+    q
+}
+
+/// A frame of glyphs, fills and shaped fills in random order over a random
+/// atlas.
 fn scene(seed: u64, w: u32, h: u32, n: usize) -> (Vec<Quad>, Vec<u8>, [u32; 2]) {
     let mut rng = Rng(seed);
     let size = [64u32, 32];
@@ -124,8 +139,9 @@ fn scene(seed: u64, w: u32, h: u32, n: usize) -> (Vec<Quad>, Vec<u8>, [u32; 2]) 
         .collect();
     let (fw, fh) = (w as f32, h as f32);
     let quads = (0..n)
-        .map(|_| match rng.next() % 3 {
+        .map(|_| match rng.next() % 4 {
             0 => solid(&mut rng, fw, fh),
+            1 => shaped(&mut rng, fw, fh),
             _ => glyph(&mut rng, fw, fh, size),
         })
         .collect();
@@ -150,13 +166,30 @@ fn diff(bd: Backdrop, a: u32, b: u32) -> u8 {
 /// bits in both painters and may land one level apart, and an earlier
 /// difference is carried at most unchanged, so N blends bound the gap at N.
 /// Opaque writes are exact in both and would reset it, which this ignores,
-/// so the bound is loose there.
+/// so the bound is loose there. A shaped quad's edge pixel counts twice: its
+/// coverage is float arithmetic in both and may round to a byte one apart
+/// before the blend rounds again.
 fn blend_counts(quads: &[Quad], atlas: &Atlas<'_>, w: u32, h: u32) -> Vec<u8> {
     let mut counts = vec![0u8; (w * h) as usize];
     let mut one = vec![0u32; (w * h) as usize];
     for q in quads {
         let alpha = q.color >> 24;
         let glyph = q.is_textured();
+        let shaped = !glyph && !q.shape.is_none();
+        if shaped {
+            let mut probe = *q;
+            probe.color = 0xffff_ffff;
+            one.fill(0);
+            stein_shell::paint::paint(Blend::Scalar, &mut one, w as usize, &[probe], atlas);
+            let translucent = alpha != 0 && alpha != 255;
+            for (c, &p) in counts.iter_mut().zip(&one) {
+                let v = p & 0xff;
+                let edge = v > 0 && v < 255;
+                let blends = 2 * u8::from(edge) + u8::from(translucent && v > 0);
+                *c = c.saturating_add(blends);
+            }
+            continue;
+        }
         if !glyph && (alpha == 0 || alpha == 255) {
             continue;
         }

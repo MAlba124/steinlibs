@@ -62,7 +62,7 @@ impl Backdrop {
     }
 
     /// An opaque fill colour as it lands in the buffer.
-    fn solid(self, color: u32) -> u32 {
+    pub(crate) fn solid(self, color: u32) -> u32 {
         match self {
             Backdrop::Opaque => color,
             Backdrop::Clear => color | 0xff00_0000,
@@ -88,26 +88,28 @@ fn fill_quad(blend: Blend, bd: Backdrop, pixels: &mut [u32], stride_px: usize, h
             return;
         }
 
-        let a = (q.color >> 24) as u8;
-        if a == 0 || a == 0xff {
-            let color = bd.solid(q.color);
-            for y in y0..y1 {
-                pixels[y * stride_px + x0..y * stride_px + x1].fill(color);
-            }
-            return;
-        }
-        let cov = [a; FILL_RUN];
-        let row_blend = match bd {
-            Backdrop::Opaque => blend::blend_row,
-            Backdrop::Clear => blend::blend_row_argb,
-        };
         for y in y0..y1 {
-            let row = &mut pixels[y * stride_px + x0..y * stride_px + x1];
-            for run in row.chunks_mut(FILL_RUN) {
-                let n = run.len();
-                row_blend(blend, run, &cov[..n], q.color);
-            }
+            fill_span(blend, bd, &mut pixels[y * stride_px + x0..y * stride_px + x1], q.color);
         }
+    }
+}
+
+/// One run of a solid colour, written when opaque and blended at its alpha
+/// otherwise.
+pub(crate) fn fill_span(blend: Blend, bd: Backdrop, row: &mut [u32], color: u32) {
+    let a = (color >> 24) as u8;
+    if a == 0 || a == 0xff {
+        row.fill(bd.solid(color));
+        return;
+    }
+    let cov = [a; FILL_RUN];
+    let row_blend = match bd {
+        Backdrop::Opaque => blend::blend_row,
+        Backdrop::Clear => blend::blend_row_argb,
+    };
+    for run in row.chunks_mut(FILL_RUN) {
+        let n = run.len();
+        row_blend(blend, run, &cov[..n], color);
     }
 }
 
@@ -298,8 +300,10 @@ fn paint_lifted(p: &Painter<'_>, pixels: &mut [u32], region: [u32; 4], lift: f32
             blend_glyph(blend, bd, pixels, stride_px, height, &q, atlas);
         } else if q.is_image() {
             blend_image(bd, pixels, stride_px, height, &q, &atlas.images);
-        } else {
+        } else if q.shape.is_none() {
             fill_quad(blend, bd, pixels, stride_px, height, &q);
+        } else {
+            crate::round::fill_shaped(blend, bd, pixels, stride_px, height, &q);
         }
     }
 }
@@ -416,10 +420,20 @@ fn blend_image(bd: Backdrop, pixels: &mut [u32], stride_px: usize, height: usize
         return;
     }
     let [iw, ih] = img.size;
-    let lo = [q.rect.min[0].max(q.clip.min[0]), q.rect.min[1].max(q.clip.min[1])];
-    let hi = [q.rect.max[0].min(q.clip.max[0]), q.rect.max[1].min(q.clip.max[1])];
-    let (x0, x1) = centres(lo[0], hi[0], stride_px);
-    let (y0, y1) = centres(lo[1], hi[1], height);
+    let shaped = !q.shape.is_none();
+    let (x0, y0, x1, y1) = if shaped {
+        match crate::round::bounds(q, stride_px, height) {
+            Some([x0, y0, x1, y1]) => (x0, y0, x1, y1),
+            None => return,
+        }
+    } else {
+        let lo = [q.rect.min[0].max(q.clip.min[0]), q.rect.min[1].max(q.clip.min[1])];
+        let hi = [q.rect.max[0].min(q.clip.max[0]), q.rect.max[1].min(q.clip.max[1])];
+        let (x0, x1) = centres(lo[0], hi[0], stride_px);
+        let (y0, y1) = centres(lo[1], hi[1], height);
+        (x0, y0, x1, y1)
+    };
+    let outline = crate::round::Outline::of(q);
     let ext = [
         (q.rect.max[0] - q.rect.min[0]).max(1e-6),
         (q.rect.max[1] - q.rect.min[1]).max(1e-6),
@@ -430,8 +444,17 @@ fn blend_image(bd: Backdrop, pixels: &mut [u32], stride_px: usize, height: usize
         let row = &img.pixels[ty * iw as usize * 4..(ty + 1) * iw as usize * 4];
         let dst = &mut pixels[y * stride_px..y * stride_px + x1.max(x0)];
         for (x, d) in dst.iter_mut().enumerate().skip(x0) {
+            let cov = if shaped {
+                let dist = outline.distance([x as f32 + 0.5, y as f32 + 0.5]);
+                match crate::round::alpha_byte(outline.coverage(dist), 255.0) {
+                    0 => continue,
+                    c => u32::from(c),
+                }
+            } else {
+                255
+            };
             let tx = texel(x as f32 + 0.5, q.rect.min[0], ext[0], q.uv[0], q.uv[2], iw);
-            *d = tint.over(bd, *d, &row[tx * 4..tx * 4 + 4]);
+            *d = tint.over(bd, *d, &row[tx * 4..tx * 4 + 4], cov);
         }
     }
 }
@@ -452,11 +475,12 @@ impl Tint {
         }
     }
 
-    /// Blend one RGBA texel over `dst`, XRGB or premultiplied ARGB.
+    /// Blend one RGBA texel over `dst`, XRGB or premultiplied ARGB, its
+    /// alpha scaled by a coverage of 0 to 255.
     #[inline]
-    fn over(&self, bd: Backdrop, dst: u32, t: &[u8]) -> u32 {
+    fn over(&self, bd: Backdrop, dst: u32, t: &[u8], cov: u32) -> u32 {
         let mul = |c: u8, m: u32| (u32::from(c) * m + 127) / 255;
-        let a = mul(t[3], self.a);
+        let a = (mul(t[3], self.a) * cov + 127) / 255;
         let fg = (mul(t[0], self.rgb[0]) << 16) | (mul(t[1], self.rgb[1]) << 8) | mul(t[2], self.rgb[2]);
         match bd {
             Backdrop::Opaque => blend::blend_px(dst, a as u8, fg),

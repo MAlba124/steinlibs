@@ -79,6 +79,7 @@ macro_rules! ui {
         }; 4];
         let mut kstack = [0u64; 32];
         let mut fill = [0u32; N];
+        let mut shape = [stein_ui::draw::Shape::NONE; N];
         let storage = UiStorage {
             layout: LayoutStorage {
                 key: &mut lkey,
@@ -103,6 +104,7 @@ macro_rules! ui {
             custom: &mut custom,
             key_stack: &mut kstack,
             fill: &mut fill,
+            shape: &mut shape,
         };
         #[allow(unused_mut)]
         let mut $u = Ui::new(storage).expect("storage agrees");

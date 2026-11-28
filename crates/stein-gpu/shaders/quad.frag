@@ -11,7 +11,7 @@ struct Quad {
     uint color;
     uint slot;
     uint kind;
-    uint pad;
+    uint radius;
 };
 
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Quads {
@@ -44,12 +44,42 @@ layout(location = 1) in vec4 v_color;
 layout(location = 2) flat in uint v_slot;
 layout(location = 3) flat in uint v_kind;
 layout(location = 4) flat in ivec2 v_origin;
+layout(location = 5) flat in vec4 v_rect;
+layout(location = 6) flat in uvec2 v_shape;
 
 layout(location = 0) out vec4 o_color;
 
+// stein-shell round.rs, the same arithmetic in the same order. Coverage of
+// the pixel centre against the rounded outline, less the hole for a ring.
+float shape_coverage() {
+    vec2 centre = (v_rect.xy + v_rect.zw) * 0.5;
+    vec2 half_size = max(v_rect.zw - v_rect.xy, vec2(0.0)) * 0.5;
+    float limit = min(half_size.x, half_size.y);
+    vec2 d = gl_FragCoord.xy - centre;
+    uint corner = d.x < 0.0 ? (d.y < 0.0 ? 0u : 3u) : (d.y < 0.0 ? 1u : 2u);
+    float r = min(float((v_shape.x >> (corner * 8u)) & 0xffu), limit);
+    float ax = abs(d.x) - half_size.x + r;
+    float ay = abs(d.y) - half_size.y + r;
+    float ox = max(ax, 0.0);
+    float oy = max(ay, 0.0);
+    float dist = sqrt(ox * ox + oy * oy) + min(max(ax, ay), 0.0) - r;
+    float outer = clamp(0.5 - dist, 0.0, 1.0);
+    float stroke = float(v_shape.y);
+    return stroke > 0.0 ? outer - clamp(0.5 - dist - stroke, 0.0, 1.0) : outer;
+}
+
+// round.rs alpha_byte, coverage times an alpha of 0 to 255 rounded to a byte.
+float alpha_byte(float coverage, float alpha) {
+    return floor(coverage * alpha + 0.5) / 255.0;
+}
+
 void main() {
+    bool shaped = v_shape != uvec2(0u);
     if (v_kind == SOLID) {
         o_color = v_color;
+        if (shaped) {
+            o_color.a = alpha_byte(shape_coverage(), floor(v_color.a * 255.0 + 0.5));
+        }
         return;
     }
     if (v_kind == COVERAGE) {
@@ -69,4 +99,7 @@ void main() {
     // Slots differ per quad, so the index is not uniform across a wave.
     vec4 t = texture(sampler2D(textures[nonuniformEXT(v_slot)], samplers[NEAREST_CLAMP]), v_uv);
     o_color = t * v_color;
+    if (shaped) {
+        o_color.a *= alpha_byte(shape_coverage(), 255.0);
+    }
 }

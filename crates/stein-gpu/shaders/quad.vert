@@ -2,7 +2,8 @@
 #extension GL_EXT_buffer_reference : require
 
 // The 2D quad path, see stein_gpu::quad. Solid and coverage quads follow
-// stein-shell's paint.rs to the pixel, image quads are plain textured rects.
+// stein-shell's paint.rs to the pixel, image quads are plain textured rects,
+// and shaped quads cover the pixels round.rs's bounds gives.
 
 // Mirrors stein_gpu::quad::GpuQuad, 64 bytes, offsets pinned by a Rust test.
 struct Quad {
@@ -11,8 +12,8 @@ struct Quad {
     vec4 uv;    // u v w h, normalised
     uint color; // ARGB, top byte alpha
     uint slot;  // texture table index, image quads
-    uint kind;  // 0 solid, 1 coverage, 2 image
-    uint pad;
+    uint kind;  // 0 solid, 1 coverage, 2 image, stroke in bits 8..16
+    uint radius; // corner radii as bytes, top left lowest
 };
 
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Quads {
@@ -39,6 +40,8 @@ layout(location = 1) out vec4 v_color;
 layout(location = 2) flat out uint v_slot;
 layout(location = 3) flat out uint v_kind;
 layout(location = 4) flat out ivec2 v_origin;
+layout(location = 5) flat out vec4 v_rect;
+layout(location = 6) flat out uvec2 v_shape; // radius, stroke
 
 // Two triangles over the pixel rect.
 const vec2 CORNERS[6] = vec2[6](
@@ -67,10 +70,23 @@ void main() {
     Quad q = root.quads.q[gl_InstanceIndex];
     vec2 corner = CORNERS[gl_VertexIndex];
     ivec2 screen = ivec2(root.size);
+    uint kind = q.kind & 0xffu;
+    uint stroke = (q.kind >> 8) & 0xffu;
+    bool shaped = kind != COVERAGE && (q.radius != 0u || stroke != 0u);
     v_uv = vec2(0.0);
     v_origin = ivec2(0);
+    v_rect = q.rect;
+    v_shape = shaped ? uvec2(q.radius, stroke) : uvec2(0u);
     vec2 p;
-    if (q.kind == COVERAGE) {
+    if (shaped) {
+        // round.rs bounds. [floor(min), ceil(max)) of the rect, the pixels
+        // whose centres the clip holds. The fragment stage weighs each one.
+        ivec2 lo = max(max(ifloor(q.rect.xy), iceil(q.clip.xy - 0.5)), ivec2(0));
+        ivec2 hi = min(min(iceil(q.rect.zw), iceil(q.clip.zw - 0.5)), screen);
+        p = mix(vec2(lo), vec2(max(hi, lo)), corner);
+        vec2 extent = max(q.rect.zw - q.rect.xy, vec2(1e-6));
+        v_uv = q.uv.xy + (p - q.rect.xy) / extent * q.uv.zw;
+    } else if (kind == COVERAGE) {
         // paint.rs blend_glyph. One texel per pixel from rounded origins,
         // the near edges ceiled and far ones floored against the clip, and
         // clipped to the atlas so no texel outside it is read.
@@ -82,7 +98,7 @@ void main() {
         ivec2 hi = min(min(d + g, ifloor(q.clip.zw)), min(screen, d - s + asz));
         p = mix(vec2(lo), vec2(max(hi, lo)), corner);
         v_origin = d - s;
-    } else if (q.kind == SOLID) {
+    } else if (kind == SOLID) {
         // paint.rs fill_quad. The clipped rect truncated to whole pixels.
         ivec2 lo = ifloor(max(max(q.rect.xy, q.clip.xy), vec2(0.0)));
         ivec2 hi = min(ifloor(max(min(q.rect.zw, q.clip.zw), vec2(0.0))), screen);
@@ -97,7 +113,7 @@ void main() {
     }
     v_color = unpack_argb(q.color);
     v_slot = q.slot;
-    v_kind = q.kind;
+    v_kind = kind;
 
     // Pixels to NDC. Vulkan's y points down, same as the layout's. An empty
     // rect collapses to zero area and rasterizes nothing.
